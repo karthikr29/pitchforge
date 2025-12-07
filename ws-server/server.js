@@ -72,9 +72,12 @@ async function vectorLookup(companyId, query) {
 async function transcribeChunk(base64, mime = "audio/webm") {
   if (!openaiKey) throw new Error("OPENAI_API_KEY not set");
   const audioBytes = toBufferFromBase64(base64);
+  const ext =
+    mime.includes("m4a") ? "m4a" : mime.includes("wav") ? "wav" : mime.includes("ogg") ? "ogg" : "webm";
   const formData = new FormData();
-  formData.append("file", new Blob([audioBytes], { type: mime }), "audio.webm");
+  formData.append("file", new Blob([audioBytes], { type: mime }), `audio.${ext}`);
   formData.append("model", "whisper-1");
+  console.log("[ws] transcribe", { mime, bytes: audioBytes.length, ext });
   const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
     headers: { Authorization: `Bearer ${openaiKey}` },
