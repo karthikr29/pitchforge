@@ -218,6 +218,8 @@ export default function ConversationScreen() {
     await AsyncStorage.setItem("transcripts", JSON.stringify(next));
   };
 
+  const hasConversation = isRecording || isPlaying || messages.length > 0 || !!streamingText;
+
   return (
     <View style={styles.container}>
       <View style={styles.hero}>
@@ -277,17 +279,23 @@ export default function ConversationScreen() {
         </ScrollView>
       </View>
 
-      <Pressable
-        style={[styles.mic, isRecording && styles.micActive]}
-        onPress={handleTap}
-        disabled={loading}
-      >
-        <Text style={styles.micText}>{isRecording ? "Listening… tap to send" : "Tap to Talk"}</Text>
-      </Pressable>
+      {!hasConversation && (
+        <Pressable
+          style={[styles.mic, isRecording && styles.micActive]}
+          onPress={handleTap}
+          disabled={loading}
+        >
+          <Text style={styles.micText}>
+            {isRecording ? "Listening… tap to send" : "Tap to Talk"}
+          </Text>
+        </Pressable>
+      )}
 
-      <Pressable style={styles.endButton} onPress={handleEndConversation}>
-        <Text style={styles.endText}>End conversation</Text>
-      </Pressable>
+      {hasConversation && (
+        <Pressable style={styles.endButton} onPress={handleEndConversation} disabled={loading}>
+          <Text style={styles.endText}>End conversation</Text>
+        </Pressable>
+      )}
     </View>
   );
 }
