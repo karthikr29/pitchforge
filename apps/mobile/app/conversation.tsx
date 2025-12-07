@@ -15,7 +15,6 @@ import { Message } from "../src/types";
 import { useTheme } from "../src/context/ThemeContext";
 
 const audioQueue = new AudioQueue();
-const RECORD_WINDOW_MS = 2500;
 
 export default function ConversationScreen() {
   const router = useRouter();
@@ -42,8 +41,6 @@ export default function ConversationScreen() {
   const abortRef = useRef<AbortController | null>(null);
   const bufferRef = useRef<string>("");
   const [loading, setLoading] = useState(false);
-  const [callActive, setCallActive] = useState(false);
-  const callActiveRef = useRef(false);
   const { colors } = useTheme();
   const styles = useMemo(
     () => createStyles(colors, isRecording, isPlaying),
@@ -91,8 +88,7 @@ export default function ConversationScreen() {
     setRecording(false);
     if (!uri) return null;
     const base64 = await FileSystem.readAsStringAsync(uri, {
-      // Defensive: EncodingType can be undefined on some platforms; fallback to string key.
-      encoding: (FileSystem as any).EncodingType?.Base64 ?? "base64"
+      encoding: "base64"
     });
     return base64;
   };
@@ -117,11 +113,11 @@ export default function ConversationScreen() {
     }
   };
 
-  const handleSend = async (base64FromLoop?: string) => {
+  const handleSend = async () => {
     try {
       setLoading(true);
       ensureConversation();
-      const base64 = base64FromLoop ?? (await stopRecording());
+      const base64 = await stopRecording();
       if (!base64) return;
       const userMessage: Message = {
         id: uuidv4(),
@@ -169,19 +165,15 @@ export default function ConversationScreen() {
     } catch (err: any) {
       Alert.alert("Conversation failed", err?.message ?? String(err));
       setLoading(false);
-    } finally {
-      setLoading(false);
     }
   };
 
   const handleTap = async () => {
-    if (callActiveRef.current) {
-      await handleEndConversation();
-      return;
+    if (isRecording) {
+      await handleSend();
+    } else {
+      await startRecording();
     }
-    callActiveRef.current = true;
-    setCallActive(true);
-    startConversationLoop();
   };
 
   const handleInterrupt = async () => {
@@ -204,21 +196,10 @@ export default function ConversationScreen() {
   };
 
   const handleEndConversation = async () => {
-    callActiveRef.current = false;
-    setCallActive(false);
     await handleInterrupt();
     await persistTranscript();
     resetSession();
     router.replace("/");
-  };
-
-  const startConversationLoop = async () => {
-    while (callActiveRef.current) {
-      await startRecording();
-      await new Promise((res) => setTimeout(res, RECORD_WINDOW_MS));
-      if (!callActiveRef.current) break;
-      await handleSend();
-    }
   };
 
   const persistTranscript = async () => {
@@ -237,7 +218,7 @@ export default function ConversationScreen() {
     await AsyncStorage.setItem("transcripts", JSON.stringify(next));
   };
 
-  const hasActiveConversation = callActive || isPlaying || messages.length > 0 || !!streamingText;
+  const hasActiveConversation = isPlaying || messages.length > 0 || !!streamingText;
 
   return (
     <View style={styles.container}>
@@ -304,7 +285,7 @@ export default function ConversationScreen() {
         disabled={loading}
       >
         <Text style={styles.micText}>
-          {callActive ? (isRecording ? "Listening live…" : "Processing…") : "Start call"}
+          {isRecording ? "Listening… tap to send" : "Tap to Talk"}
         </Text>
       </Pressable>
 
@@ -536,5 +517,4 @@ const createStyles = (
       fontWeight: "700"
     }
   });
-
 
