@@ -1,4 +1,10 @@
 import { ExpoConfig } from "expo/config";
+import dotenv from "dotenv";
+
+// Load env from the app folder and repo root so Expo config can see API_BASE_URL, keys, etc.
+dotenv.config();
+dotenv.config({ path: "../.env" });
+dotenv.config({ path: "../../.env" });
 
 const config: ExpoConfig = {
   name: "PitchForge",
