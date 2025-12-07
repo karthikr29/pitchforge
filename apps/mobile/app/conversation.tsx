@@ -461,6 +461,7 @@ const createStyles = (
     container: {
       flex: 1,
       padding: 18,
+      paddingBottom: 32,
       gap: 12,
       backgroundColor: colors.background
     },

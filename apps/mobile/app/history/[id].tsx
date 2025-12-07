@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { View, Text, StyleSheet, ScrollView, Pressable, Alert } from "react-native";
+import * as Clipboard from "expo-clipboard";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useLocalSearchParams, useNavigation } from "expo-router";
 import { Stack } from "expo-router";
@@ -83,6 +84,15 @@ export default function TranscriptScreen() {
     ]);
   };
 
+  const handleCopy = async () => {
+    if (!transcript) return;
+    const text = transcript.messages
+      .map((m) => `${m.role.toUpperCase()}: ${m.text}`)
+      .join("\n");
+    await Clipboard.setStringAsync(text);
+    Alert.alert("Copied", "Transcript copied to clipboard");
+  };
+
   if (!transcript) {
     return (
       <View style={styles.container}>
@@ -125,6 +135,16 @@ export default function TranscriptScreen() {
             </Text>
           ))}
         </ScrollView>
+        <View style={styles.actions}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Copy transcript"
+            onPress={handleCopy}
+            style={styles.copyButton}
+          >
+            <Text style={styles.copyText}>Copy transcript</Text>
+          </Pressable>
+        </View>
       </View>
     </>
   );
@@ -132,9 +152,28 @@ export default function TranscriptScreen() {
 
 const createStyles = (colors: ReturnType<typeof useTheme>["colors"]) =>
   StyleSheet.create({
-    container: { flex: 1, padding: 16, backgroundColor: colors.background },
+    container: {
+      flex: 1,
+      padding: 16,
+      paddingBottom: 32,
+      backgroundColor: colors.background
+    },
     title: { color: colors.textMain, fontSize: 20, fontWeight: "800" },
     meta: { color: colors.textMuted, marginTop: 6 },
-    line: { color: colors.textMuted, marginBottom: 6 }
+    line: { color: colors.textMuted, marginBottom: 6 },
+    actions: {
+      marginTop: 16,
+      alignItems: "center"
+    },
+    copyButton: {
+      marginTop: 4,
+      paddingHorizontal: 18,
+      paddingVertical: 12,
+      borderRadius: 12,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.border
+    },
+    copyText: { color: colors.textMain, fontWeight: "700" }
   });
 
