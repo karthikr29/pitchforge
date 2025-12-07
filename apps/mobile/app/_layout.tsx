@@ -23,14 +23,26 @@ function LayoutStack() {
 
   return (
     <Stack
-      screenOptions={{
+      screenOptions={({ navigation }) => ({
         headerStyle: { backgroundColor: colors.surface },
         headerTintColor: colors.textMain,
         contentStyle: { backgroundColor: colors.background },
         headerRight: () => <HeaderMenu />,
+        // Hide default back label and provide an icon-only back button.
+        headerBackVisible: false,
         headerBackTitleVisible: false,
-        headerBackTitle: ""
-      }}
+        headerBackTitle: "",
+        headerLeft: ({ canGoBack }) =>
+          canGoBack ? (
+            <Pressable
+              accessibilityLabel="Go back"
+              onPress={() => navigation.goBack()}
+              style={{ paddingHorizontal: 12, paddingVertical: 6 }}
+            >
+              <Ionicons name="chevron-back" size={24} color={colors.icon} />
+            </Pressable>
+          ) : null
+      })}
     >
       <Stack.Screen name="index" options={{ title: "Dashboard" }} />
       <Stack.Screen name="personas" options={{ title: "Personas" }} />
