@@ -24,7 +24,6 @@ temp
 .turbo
 .vercel
 .idea
-.vscode
 *.log
 supabase/.temp
 
