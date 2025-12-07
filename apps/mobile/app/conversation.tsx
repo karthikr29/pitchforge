@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { View, Text, Pressable, StyleSheet, Alert, ScrollView, Animated } from "react-native";
 import { Audio } from "expo-av";
 // Use legacy FS API to avoid deprecated readAsStringAsync warnings.
@@ -6,6 +6,7 @@ import * as FileSystem from "expo-file-system/legacy";
 import * as Haptics from "expo-haptics";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useRouter } from "expo-router";
+import { useFocusEffect } from "@react-navigation/native";
 import { v4 as uuidv4 } from "uuid";
 import { personas } from "../src/constants/personas";
 import { synthesizeTts } from "../src/api/client";
@@ -125,6 +126,28 @@ export default function ConversationScreen() {
     }
   };
 
+  const stopAllAudio = async () => {
+    callActiveRef.current = false;
+    setCallActive(false);
+    abortRef.current?.abort();
+    wsRef.current?.stop();
+    wsRef.current = null;
+    if (recordingRef.current) {
+      try {
+        await recordingRef.current.stopAndUnloadAsync();
+      } catch {
+        // ignore
+      }
+      recordingRef.current = null;
+    }
+    setRecording(false);
+    await audioQueue.stop();
+    audioQueue.clear();
+    setQueue([]);
+    setPlaying(false);
+    clearStreamingText();
+  };
+
   const handleSendChunk = async () => {
     try {
       ensureConversation();
@@ -229,35 +252,20 @@ export default function ConversationScreen() {
     }
   };
 
-  const handleInterrupt = async () => {
-    abortRef.current?.abort();
-    if (recordingRef.current) {
-      try {
-        await recordingRef.current.stopAndUnloadAsync();
-      } catch (e) {
-        // ignore
-      }
-      recordingRef.current = null;
-      setRecording(false);
-    }
-    await audioQueue.stop();
-    audioQueue.clear();
-    setQueue([]);
-    setPlaying(false);
-    clearStreamingText();
-    setRecording(false);
-  };
-
   const handleEndConversation = async () => {
-    callActiveRef.current = false;
-    setCallActive(false);
-    wsRef.current?.stop();
-    wsRef.current = null;
-    await handleInterrupt();
+    await stopAllAudio();
     await persistTranscript();
     resetSession();
-    router.replace("/");
   };
+
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        // Ensure nothing keeps running if the user navigates away.
+        stopAllAudio();
+      };
+    }, [])
+  );
 
   const persistTranscript = async () => {
     if (!messages.length) return;
