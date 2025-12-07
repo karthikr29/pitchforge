@@ -111,7 +111,14 @@ export default function TranscriptScreen() {
               accessibilityLabel="Delete transcript"
               onPress={handleDelete}
               disabled={deleting}
-              style={{ paddingHorizontal: 8 }}
+              style={{
+                width: 40,
+                height: 24,
+                marginRight: 4,
+                marginLeft: 4,
+                alignItems: "center",
+                justifyContent: "center"
+              }}
             >
               <Ionicons
                 name="trash-outline"
