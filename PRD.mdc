@@ -1,0 +1,484 @@
+# Product Requirements Document (PRD)
+
+## PitchForge - MVP
+
+**Version:** 2.0  
+
+**Date:** December 7, 2025  
+
+**Status:** Approved for Development  
+
+**Product Owner:** [Your Name]
+
+---
+
+## 1. Executive Summary
+
+A mobile application that enables sales representatives (Users) to practice sales conversations with AI-powered customer personas (AI). The user acts as the **Seller**, and the AI acts as the **Prospect**. The system uses RAG (Retrieval-Augmented Generation) to ground the AI's objections in the user's actual company scripts and materials.
+
+**Business Model:** Freemium SaaS
+
+- **Free Trial:** 30 minutes of talk time (All 5 personas, Generic RAG)
+
+- **Individual Pro:** $29/month (300 mins, Generic RAG)
+
+- **Company Team:** $19/month/seat (Min 5 seats, Custom RAG with Company Scripts)
+
+---
+
+## 2. Problem Statement
+
+### Current Situation
+
+- New sales representatives lack safe environments to practice pitches and objection handling.
+
+- Role-playing with managers is expensive, time-consuming, and inconsistent.
+
+- Sales reps struggle to internalize company scripts and policies.
+
+- Companies lack data on which reps are actually practicing.
+
+### Proposed Solution
+
+An AI-powered mobile simulator where sales reps can practice unlimited "mock calls" with realistic customer personas. The AI acts as a difficult customer, raising objections based on the company's actual product data. The app provides instant feedback on tone, objection handling, and script adherence.
+
+---
+
+## 3. Goals & Success Metrics
+
+### Primary Goals
+
+1.  **Low Latency:** Achieve a "real-time" conversation feel using streaming architecture (< 3.5s time-to-audio).
+
+2.  **Realistic Simulation:** The user feels like they are on a real sales call, utilizing "Barge-in" capabilities to interrupt the AI.
+
+3.  **RAG Accuracy:** AI objections must be relevant to the specific product being sold (for Enterprise users).
+
+4.  **Multi-Tenancy:** Securely support multiple companies with isolated data from Day 1.
+
+### Success Metrics
+
+-   **Latency:** Time-to-First-Audio < 3.5 seconds (90th percentile).
+
+-   **Session Completion:** >70% of started calls last longer than 2 minutes.
+
+-   **Conversion:** >5% of Free Trial users convert to Paid.
+
+-   **Feedback Utility:** Users rate post-call feedback >4/5 stars.
+
+---
+
+## 4. Target Users
+
+### Primary User Type 1: Individual Sales Professionals (SDRs/AEs)
+
+-   **Goal:** Practice pitch before a big interview or hitting quota.
+
+-   **Pain Point:** Nervousness, lack of objection handling skills.
+
+-   **Usage:** Ad-hoc, high intensity before deadlines.
+
+### Primary User Type 2: Enterprise Sales Teams
+
+-   **Goal:** Onboard new hires faster; ensure consistent messaging.
+
+-   **Decision Maker:** VP of Sales / Enablement Manager.
+
+-   **Pain Point:** Cannot scale 1-on-1 coaching to 50+ reps.
+
+---
+
+## 5. Tech Stack (Revised)
+
+### Mobile Application
+
+-   **Framework:** React Native + Expo (**Must use SDK 52+**).
+
+    * *Reasoning:* SDK 52+ supports `expo/fetch` which complies with the Fetch Standard for streaming text on Android.
+
+-   **Key Libraries:**
+
+    * `expo-av`: Audio recording and playback.
+
+    * `expo-file-system`: Caching audio chunks locally.
+
+    * `expo-haptics`: Tactile feedback for "Interrupt" actions.
+
+    * `expo-router`: Navigation.
+
+### Backend & Database
+
+-   **Platform:** Supabase.
+
+-   **Compute:** **Supabase Edge Functions (Deno)**.
+
+    * *Reasoning:* Native support for `ReadableStream` to stream text tokens to the client.
+
+-   **Database:** PostgreSQL + pgvector.
+
+### AI Pipeline
+
+| Component | Provider | Model | Logic |
+
+| :--- | :--- | :--- | :--- |
+
+| **STT** (Input) | OpenAI | Whisper | Transcribes User audio to text. |
+
+| **LLM** (Brain) | Google (via OpenRouter) | **Gemini 3.0 Pro** | Generates sales persona responses (Streamed). *Latest model for max context & speed.* |
+
+| **TTS** (Voice) | OpenAI | TTS-1 | Converts text sentences to audio (Client-triggered). |
+
+| **Feedback** | Anthropic | Claude 3.5 Sonnet | Post-conversation analysis. |
+
+| **Embeddings** | OpenAI | text-embedding-3-small | Vector generation for RAG. |
+
+---
+
+## 6. Features
+
+### ✅ IN SCOPE (MVP)
+
+#### 6.1 User Authentication & Onboarding
+
+-   Email/Password Signup.
+
+-   **Free Trial Logic:** New users get a hard-capped 30-minute "wallet" upon signup. No credit card required.
+
+#### 6.2 Persona Selection (Carousel UI)
+
+-   Horizontal swipeable cards for personas.
+
+-   **Card Data:** Name (e.g., "Skeptical Sarah"), Role ("CFO"), Difficulty Level.
+
+-   **Action:** Large green **"Call [Name]"** button to initiate session.
+
+#### 6.3 Voice Conversation (The "Seller" Flow)
+
+-   **Role Reversal:** User is Seller; AI is Customer.
+
+-   **Call Initiation:** User taps "Call" → App plays "Ringing" sound → AI picks up ("Hello, this is Sarah").
+
+-   **Interaction Model:**
+
+    * **Tap-to-Talk:** User holds button to speak, releases to send.
+
+    * **Streaming Response:** User sees text captions appear immediately; audio plays as soon as the first sentence is ready.
+
+    * **Interrupt/Barge-In:** User can tap "Interrupt" button while AI is speaking. This immediately stops audio playback, clears the queue, and opens the microphone.
+
+#### 6.4 RAG-Powered Context
+
+-   System queries vector DB *only* when factual claims or specific objections are needed.
+
+-   **Multi-tenant isolation:** Users only retrieve chunks from their company's `company_id`.
+
+#### 6.5 Post-Conversation Feedback
+
+-   Claude 3.5 Sonnet analyzes the transcript.
+
+-   **Output:** Score (1-10), Strengths, Weaknesses, and "Better ways to phrase X."
+
+#### 6.6 Data Storage
+
+-   Store full **Text Transcripts** in `conversation_messages`.
+
+-   **Do NOT store Audio Files** (to save costs and complexity for MVP).
+
+---
+
+## 7. Pricing Model (Revised)
+
+### Tier 1: Free Trial (The Hook)
+
+-   **Price:** $0.
+
+-   **Access:** 30 Minutes Total (Lifetime).
+
+-   **Personas:** All 5 Personas included.
+
+-   **RAG:** Generic Sales Scripts only.
+
+-   **Expiration:** Account locks after 30 mins used; prompts upgrade.
+
+### Tier 2: Individual Pro
+
+-   **Price:** $29 / month.
+
+-   **Access:** 300 Minutes / month.
+
+-   **Personas:** All 5 Personas.
+
+-   **Features:** Detailed History & Feedback.
+
+-   **Overage:** $0.10/minute.
+
+### Tier 3: Company / Enterprise
+
+-   **Price:** $19 / seat / month.
+
+-   **Minimum:** 5 Seats ($95/mo minimum).
+
+-   **Access:** Pooled Minutes (e.g., 5 seats = 1,500 mins shared).
+
+-   **Killer Feature:** **Custom RAG** (Upload *Your* Company PDF Scripts).
+
+---
+
+## 8. User Stories
+
+### Practice Sessions
+
+-   **US-1:** As a Seller, I want to initiate a call with "Budget Brian" so I can practice handling price objections.
+
+-   **US-2:** As a Seller, I want the AI to "pick up" the phone like a real prospect so the roleplay feels immersive.
+
+-   **US-3:** As a Seller, I want to interrupt the AI if they are rambling, just like I would in a real spirited debate.
+
+-   **US-4:** As a Seller, I want the AI to know about my product (e.g., InvoiceFlow pricing) so the objections are factual (Enterprise only).
+
+### Feedback & Learning
+
+-   **US-5:** As a sales trainee, I want to receive detailed feedback after each conversation to understand what I did well.
+
+-   **US-6:** As a sales trainee, I want to review past transcripts to track my improvement over time.
+
+---
+
+## 9. Technical Architecture
+
+### 9.1 The "Streaming Text / Queued Audio" Pattern
+
+*Essential for low latency interactions.*
+
+```
+
+┌──────────────┐                                    ┌──────────────┐
+
+│  Mobile App  │                                    │   Supabase   │
+
+└──────┬───────┘                                    └──────┬───────┘
+
+│ 1. Upload Audio Blob                              │
+
+│──────────────────────────────────────────────────►│
+
+│                                                   │ 2. Whisper (STT)
+
+│                                                   │ 3. RAG Lookup
+
+│                                                   │ 4. Prompt Gemini 3.0
+
+│ 5. Stream TEXT Response (Chunk by Chunk)          │
+
+│◄──────────────────────────────────────────────────│
+
+│ "Look..." " I'm..." " not..." " interested."      │
+
+│                                                   │
+
+┌──────▼───────┐                                           │
+
+│ Client Logic │                                           │
+
+└──────┬───────┘                                           │
+
+│ 6. Detect Sentence End (".")                      │
+
+│ 7. Send Sentence 1 to OpenAI TTS API ────────────►│
+
+│ 8. Download MP3 & Play Immediately ◄──────────────│
+
+│ 9. Fetch Sentence 2 (Background) ────────────────►│
+
+```
+
+### 9.2 The Interrupt (Barge-In) Flow
+
+1.  **User Action:** Taps "Interrupt" (or Taps Mic).
+
+2.  **App Logic:**
+
+    * `AudioPlayer.stopAsync()`
+
+    * `AudioQueue.clear()`
+
+    * `AbortController.abort()` (Kill incoming text stream)
+
+3.  **UI:** Mic opens immediately.
+
+4.  **Backend:** The partial AI response is saved to transcript; User's new input starts a new turn.
+
+---
+
+## 10. Data Model
+
+### Key Tables
+
+#### companies
+
+| Column | Type | Constraints | Description |
+
+|--------|------|-------------|-------------|
+
+| id | UUID | PRIMARY KEY | Unique company identifier |
+
+| subscription_type | TEXT | DEFAULT 'trial' | 'trial', 'individual', 'enterprise' |
+
+| minutes_balance | INT | DEFAULT 30 | Available minutes for the month/trial |
+
+| custom_scripts_allowed | BOOLEAN | DEFAULT false | True for Enterprise |
+
+#### users
+
+| Column | Type | Constraints | Description |
+
+|--------|------|-------------|-------------|
+
+| id | UUID | PRIMARY KEY | Unique user identifier |
+
+| company_id | UUID | FK → companies | Company user belongs to |
+
+| role | TEXT | DEFAULT 'member' | 'admin', 'member' |
+
+#### conversations
+
+| Column | Type | Constraints | Description |
+
+|--------|------|-------------|-------------|
+
+| id | UUID | PRIMARY KEY | Unique conversation ID |
+
+| transcript_text | JSONB | | Full text history |
+
+| feedback_json | JSONB | | Analysis from Claude |
+
+| **audio_recordings** | NULL | | **Not storing audio for MVP** |
+
+---
+
+## 11. User Flows
+
+### 11.1 The "Call" Flow
+
+1.  **Home:** User swipes carousel to "Skeptical Sarah."
+
+2.  **Tap:** User taps "Call Sarah."
+
+3.  **Screen:** Transitions to "In Call" UI (Avatar pulsing).
+
+4.  **Sound:** Ringing tone...
+
+5.  **Connection:** AI Audio: *"Hello? Who is this?"*
+
+6.  **User Turn:**
+
+    * User holds "Talk" button.
+
+    * User: *"Hi Sarah, I'm calling about the new software update."*
+
+    * User releases button.
+
+7.  **AI Turn:**
+
+    * App shows: "Sarah is thinking..."
+
+    * Text streams in.
+
+    * Audio starts playing: *"I told you guys to stop calling me..."*
+
+8.  **Handling Objections:**
+
+    * Sarah starts rambling.
+
+    * User taps **"Interrupt"**.
+
+    * Audio cuts. User speaks: *"Wait, just hear me out..."*
+
+9.  **Termination:** User taps "Hang Up."
+
+10. **Feedback:** Loading screen (~5s) → Feedback Report.
+
+---
+
+## 12. Non-Functional Requirements
+
+### Performance
+
+-   **Time-to-Text:** < 1.0s (First token from Gemini 3.0 Pro appears).
+
+-   **Time-to-Audio:** < 3.5s (Audio starts playing).
+
+-   **Concurrency:** App must handle downloading Sentence B while playing Sentence A without stuttering.
+
+### Reliability
+
+-   **Streaming Stability:** Use `expo/fetch` to ensure streams don't buffer indefinitely on Android.
+
+-   **Overage Protection:** Backend must reject requests if `company.minutes_balance <= 0`.
+
+---
+
+## Appendix A: Personas (Refined)
+
+**Budget-Conscious Brian**
+
+-   **System Prompt:** "You are a price-sensitive customer. You are interested but constantly bring up competitors' lower prices. Be polite but firm about budget."
+
+-   **Voice:** "echo"
+
+**Skeptical Sarah**
+
+-   **System Prompt:** "You doubt marketing claims. You ask for proof, case studies, and data. You interrupt frequently with 'How do I know that's true?'"
+
+-   **Voice:** "nova"
+
+**Busy Executive Bob**
+
+-   **System Prompt:** "You are time-pressed. You frequently say 'Get to the point' and 'I only have 5 minutes.' You value ROI."
+
+-   **Voice:** "onyx"
+
+**Technical Tom**
+
+-   **System Prompt:** "You ask specific feature questions. You want to understand integrations and specs. You are methodical."
+
+-   **Voice:** "fable"
+
+**Indecisive Irene**
+
+-   **System Prompt:** "You struggle to make decisions. You say 'I'm not sure' and 'What if it doesn't work?' You need reassurance."
+
+-   **Voice:** "shimmer"
+
+---
+
+## Appendix B: Development Phases
+
+### Phase 1: Foundation (Weeks 1-2)
+
+-   Supabase Setup & Multi-tenant Schema.
+
+-   React Native Expo 52+ Setup.
+
+-   **Key Deliverable:** Authentication & Persona Carousel.
+
+### Phase 2: The Core Loop (Weeks 3-4)
+
+-   Implement "Text Stream -> Audio Queue" pipeline.
+
+-   Integrate Gemini 3.0 Pro & OpenAI TTS.
+
+-   Implement "Barge-In" logic.
+
+-   **Key Deliverable:** Functional Voice Chat (no RAG yet).
+
+### Phase 3: RAG & Polish (Week 5-6)
+
+-   Implement pgvector & Embeddings.
+
+-   Upload sample scripts for testing.
+
+-   Integrate Claude 3.5 Sonnet for Feedback.
+
+-   **Key Deliverable:** Full MVP ready for TestFlight.
+
