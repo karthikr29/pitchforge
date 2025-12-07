@@ -140,7 +140,8 @@ export default function ConversationScreen() {
 
       const ws = wsRef.current;
       if (ws) {
-        ws.sendAudio(uuidv4(), "audio/webm", base64);
+        // Expo HIGH_QUALITY records m4a (AAC) on iOS; send correct mime so Whisper accepts it.
+        ws.sendAudio(uuidv4(), "audio/m4a", base64);
       } else {
         Alert.alert("Conversation failed", "Voice channel not connected");
       }
