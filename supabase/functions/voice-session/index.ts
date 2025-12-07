@@ -15,8 +15,17 @@ type Body = {
   conversationId?: string;
 };
 
+function toBytesFromBase64(input: string) {
+  const cleaned = input.includes(",") ? input.split(",").pop() ?? input : input;
+  try {
+    return Uint8Array.from(atob(cleaned), (c) => c.charCodeAt(0));
+  } catch (err) {
+    throw new Error("Invalid audio payload (base64 decode failed)");
+  }
+}
+
 async function transcribeWhisper(base64: string) {
-  const audioBytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  const audioBytes = toBytesFromBase64(base64);
   const formData = new FormData();
   formData.append("file", new Blob([audioBytes], { type: "audio/mpeg" }), "audio.mp3");
   formData.append("model", "whisper-1");
