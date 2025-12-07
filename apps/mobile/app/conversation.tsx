@@ -219,14 +219,23 @@ export default function ConversationScreen() {
       const startedAt = Date.now();
       while (callActiveRef.current && !isPlaying) {
         const status = await recording.getStatusAsync();
-        const level = status.metering ?? lastLevel;
+        const hasMeter = typeof status.metering === "number";
+        const level = hasMeter ? (status.metering as number) : lastLevel;
         lastLevel = level;
-        if (level > VAD_THRESHOLD_DB) {
+        if (hasMeter && level > VAD_THRESHOLD_DB) {
           heardVoice = true;
           lastVoiceAt = Date.now();
         }
         const duration = status.durationMillis ?? 0;
         const sinceVoice = Date.now() - lastVoiceAt;
+        // Simulator often reports no metering; fall back to a duration-based send to avoid stalling.
+        if (!hasMeter && duration > MIN_TURN_MS + SILENCE_MS) {
+          const base64 = await stopRecording();
+          if (base64) {
+            await handleSendChunk(base64);
+          }
+          return;
+        }
         if (heardVoice && sinceVoice > SILENCE_MS && duration > MIN_TURN_MS) {
           const base64 = await stopRecording();
           if (base64) {
@@ -239,10 +248,13 @@ export default function ConversationScreen() {
         }
         await sleep(POLL_INTERVAL_MS);
       }
-      await stopRecording()?.catch(() => null);
+      const base64 = await stopRecording().catch(() => null);
+      if (base64) {
+        await handleSendChunk(base64);
+      }
     } catch (err) {
       console.warn("Listen loop failed", err);
-      await stopRecording()?.catch(() => null);
+      await stopRecording().catch(() => null);
     } finally {
       listeningRef.current = false;
     }
