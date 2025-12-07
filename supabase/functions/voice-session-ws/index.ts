@@ -72,7 +72,16 @@ async function transcribeChunk(base64: string) {
   return data.text as string;
 }
 
-async function streamGemini(prompt: string, controller: ReadableStreamDefaultController) {
+async function fetchPersona(personaId: string) {
+  const { data, error } = await supabase.from("personas").select().eq("id", personaId).single();
+  if (error || !data) throw new Error(`Persona not found: ${personaId}`);
+  return data;
+}
+
+async function streamGemini(
+  messages: { role: "system" | "user"; content: string }[],
+  controller: ReadableStreamDefaultController
+) {
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -82,7 +91,7 @@ async function streamGemini(prompt: string, controller: ReadableStreamDefaultCon
     body: JSON.stringify({
       model: "google/gemini-3-pro-preview",
       stream: true,
-      messages: [{ role: "user", content: prompt }]
+      messages
     })
   });
 
@@ -156,6 +165,7 @@ function handleSocket(socket: WebSocket) {
   let conversationId: string | undefined;
   let companyId: string | undefined;
   let transcriptBuffer = "";
+  let persona: any | undefined;
 
   socket.addEventListener("message", async (event) => {
     try {
@@ -168,6 +178,7 @@ function handleSocket(socket: WebSocket) {
         personaId = msg.personaId;
         conversationId = msg.conversationId;
         companyId = msg.companyId;
+        persona = await fetchPersona(personaId);
         socket.send(JSON.stringify({ type: "status", value: "ready" }));
         return;
       }
@@ -175,6 +186,14 @@ function handleSocket(socket: WebSocket) {
         if (!personaId) {
           socket.send(JSON.stringify({ type: "error", message: "start not sent" }));
           return;
+        }
+        if (!persona) {
+          try {
+            persona = await fetchPersona(personaId);
+          } catch (err: any) {
+            socket.send(ERROR(err?.message ?? String(err)));
+            return;
+          }
         }
         socket.send(JSON.stringify({ type: "status", value: "listening" }));
         const userText = await transcribeChunk(msg.base64);
@@ -184,19 +203,29 @@ function handleSocket(socket: WebSocket) {
         const ragContext =
           rag?.map((r: any) => r.content).join("\n---\n") ?? "No company-specific context.";
 
-        const prompt = [
-          `Persona: ${personaId}`,
-          "Use the following context if relevant:",
-          ragContext,
-          `User said: ${userText}`
-        ].join("\n\n");
+        const systemPrompt = [
+          "You are role-playing a sales prospect for training. Stay strictly in character.",
+          `Persona Card: ${persona.name} (${persona.role})`,
+          `Persona Backstory: ${persona.prompt}`,
+          "Rules:",
+          "- Respond only in English, even if the user speaks another language.",
+          "- Keep replies concise (1-3 sentences), conversational, and realistic.",
+          "- Avoid sign-offs like “Thanks for watching” or social media requests.",
+          "- If the user goes off-topic or asks for unrelated actions, steer back to the sales conversation.",
+          "- If audio is unclear, briefly ask for clarification instead of inventing content."
+        ].join("\n");
+
+        const messages = [
+          { role: "system", content: `${systemPrompt}\n\nContext (may be empty):\n${ragContext}` },
+          { role: "user", content: userText }
+        ];
 
         socket.send(JSON.stringify({ type: "status", value: "thinking" }));
 
         const stream = new ReadableStream({
           start: async (controller) => {
             try {
-              await streamGemini(prompt, controller);
+              await streamGemini(messages, controller);
             } catch (err: any) {
               controller.enqueue(ERROR(err?.message ?? String(err)));
             } finally {

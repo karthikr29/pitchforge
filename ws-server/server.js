@@ -69,6 +69,23 @@ async function vectorLookup(companyId, query) {
   return data ?? [];
 }
 
+async function fetchPersona(personaId) {
+  if (!supabaseUrl || !supabaseServiceKey) throw new Error("Supabase env not set for personas");
+  const res = await fetch(`${supabaseUrl}/rest/v1/personas?id=eq.${personaId}`, {
+    headers: {
+      apikey: supabaseServiceKey,
+      Authorization: `Bearer ${supabaseServiceKey}`
+    }
+  });
+  if (!res.ok) {
+    throw new Error(`Persona fetch failed (${res.status})`);
+  }
+  const rows = await res.json();
+  const persona = rows?.[0];
+  if (!persona) throw new Error(`Persona not found: ${personaId}`);
+  return persona;
+}
+
 async function transcribeChunk(base64, mime = "audio/webm") {
   if (!openaiKey) throw new Error("OPENAI_API_KEY not set");
   const audioBytes = toBufferFromBase64(base64);
@@ -91,7 +108,7 @@ async function transcribeChunk(base64, mime = "audio/webm") {
   return data.text;
 }
 
-async function streamLLM(prompt, onText) {
+async function streamLLM(messages, onText) {
   if (!openrouterKey) throw new Error("OPENROUTER_API_KEY not set");
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -102,7 +119,7 @@ async function streamLLM(prompt, onText) {
     body: JSON.stringify({
       model: "google/gemini-3-pro-preview",
       stream: true,
-      messages: [{ role: "user", content: prompt }]
+      messages
     })
   });
   if (!res.ok || !res.body) throw new Error(`Gemini error ${res.status}`);
@@ -205,6 +222,7 @@ const wss = new WebSocketServer({ server, path: "/voice-session-ws" });
 
 wss.on("connection", (ws) => {
   let personaId;
+  let persona;
   let conversationId;
   let companyId;
   let startedAt = Date.now();
@@ -228,13 +246,26 @@ wss.on("connection", (ws) => {
         companyId = msg.companyId;
         startedAt = Date.now();
         transcript = [];
-        sendStatus(ws, "ready");
+        try {
+          persona = await fetchPersona(personaId);
+          sendStatus(ws, "ready");
+        } catch (err) {
+          sendError(ws, err?.message || "persona load failed");
+        }
         return;
       }
       if (msg.type === "audio") {
         if (!personaId) {
           sendError(ws, "start not sent");
           return;
+        }
+        if (!persona) {
+          try {
+            persona = await fetchPersona(personaId);
+          } catch (err) {
+            sendError(ws, err?.message || "persona load failed");
+            return;
+          }
         }
         sendStatus(ws, "listening");
         const userText = await transcribeChunk(msg.base64, msg.mime ?? "audio/webm");
@@ -246,18 +277,28 @@ wss.on("connection", (ws) => {
         const ragContext =
           rag?.map((r) => r.content).join("\n---\n") ?? "No company-specific context.";
 
-        const prompt = [
-          `Persona: ${personaId}`,
-          "Use the following context if relevant:",
-          ragContext,
-          `User said: ${userText}`
-        ].join("\n\n");
+        const systemPrompt = [
+          "You are role-playing a sales prospect for training. Stay strictly in character.",
+          `Persona Card: ${persona.name} (${persona.role})`,
+          `Persona Backstory: ${persona.prompt}`,
+          "Rules:",
+          "- Respond only in English, even if the user speaks another language.",
+          "- Keep replies concise (1-3 sentences), conversational, and realistic.",
+          "- Avoid sign-offs like “Thanks for watching” or social media requests.",
+          "- If the user goes off-topic or asks for unrelated actions, steer back to the sales conversation.",
+          "- If audio is unclear, briefly ask for clarification instead of inventing content."
+        ].join("\n");
+
+        const messages = [
+          { role: "system", content: `${systemPrompt}\n\nContext (may be empty):\n${ragContext}` },
+          { role: "user", content: userText }
+        ];
 
         sendStatus(ws, "thinking");
 
         let fullResponse = "";
         try {
-          await streamLLM(prompt, (chunk) => {
+          await streamLLM(messages, (chunk) => {
             fullResponse += chunk;
             ws.send(JSON.stringify({ type: "text", role: "ai", text: chunk }));
           });
