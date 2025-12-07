@@ -46,6 +46,7 @@ const config: ExpoConfig = {
       projectId: "00000000-0000-0000-0000-000000000000"
     },
     apiBaseUrl: process.env.API_BASE_URL || "http://localhost:54321/functions/v1",
+    wsBaseUrl: process.env.WS_BASE_URL || process.env.API_BASE_URL || "http://localhost:54321/functions/v1",
     openaiKey: process.env.OPENAI_API_KEY || "",
     openrouterKey: process.env.OPENROUTER_API_KEY || "",
     claudeKey: process.env.CLAUDE_API_KEY || "",

@@ -1,0 +1,25 @@
+{
+  "name": "sales-training",
+  "version": "1.0.0",
+  "main": "ws-server/server.js",
+  "scripts": {
+    "start": "node ws-server/server.js",
+    "dev": "node ws-server/server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/karthikr29/pitchforge.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/karthikr29/pitchforge/issues"
+  },
+  "homepage": "https://github.com/karthikr29/pitchforge#readme",
+  "description": "",
+  "dependencies": {
+    "express": "^5.2.1",
+    "ws": "^8.18.3"
+  }
+}
