@@ -37,6 +37,7 @@ export default function ConversationScreen() {
 
   const persona = personas.find((p) => p.id === personaId);
   const recordingRef = useRef<Audio.Recording | null>(null);
+  const recordingPrepareRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const bufferRef = useRef<string>("");
   const [loading, setLoading] = useState(false);
@@ -59,18 +60,23 @@ export default function ConversationScreen() {
   };
 
   const startRecording = async () => {
-    if (recordingRef.current || isRecording) return;
-    await Audio.requestPermissionsAsync();
-    await Audio.setAudioModeAsync({
-      allowsRecordingIOS: true,
-      playsInSilentModeIOS: true
-    });
-    const recording = new Audio.Recording();
-    await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-    await recording.startAsync();
-    recordingRef.current = recording;
-    setRecording(true);
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (recordingPrepareRef.current || recordingRef.current || isRecording) return;
+    recordingPrepareRef.current = true;
+    try {
+      await Audio.requestPermissionsAsync();
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true
+      });
+      const recording = new Audio.Recording();
+      await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      await recording.startAsync();
+      recordingRef.current = recording;
+      setRecording(true);
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } finally {
+      recordingPrepareRef.current = false;
+    }
   };
 
   const stopRecording = async () => {
@@ -172,6 +178,15 @@ export default function ConversationScreen() {
 
   const handleInterrupt = async () => {
     abortRef.current?.abort();
+    if (recordingRef.current) {
+      try {
+        await recordingRef.current.stopAndUnloadAsync();
+      } catch (e) {
+        // ignore
+      }
+      recordingRef.current = null;
+      setRecording(false);
+    }
     await audioQueue.stop();
     audioQueue.clear();
     setQueue([]);
