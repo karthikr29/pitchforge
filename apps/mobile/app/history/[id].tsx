@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { View, Text, StyleSheet, ScrollView, Pressable, Alert } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { useLocalSearchParams } from "expo-router";
+import { useLocalSearchParams, useNavigation } from "expo-router";
+import { Stack } from "expo-router";
 import { Message } from "../../src/types";
 import { personas } from "../../src/constants/personas";
 import { useTheme } from "../../src/context/ThemeContext";
@@ -21,6 +22,7 @@ export default function TranscriptScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const [transcript, setTranscript] = useState<Transcript | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const navigation = useNavigation();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
@@ -69,8 +71,8 @@ export default function TranscriptScreen() {
             await deleteTranscriptRemote(id);
             await removeLocal();
             Alert.alert("Deleted", "Transcript removed");
-            // Navigate back; using history.back via router.replace to be safe
-            // but we don't have router here; fallback to Alert and let user go back.
+            // Navigate back to history list
+            navigation.goBack();
           } catch (err: any) {
             Alert.alert("Delete failed", err?.message ?? String(err));
           } finally {
@@ -90,33 +92,41 @@ export default function TranscriptScreen() {
   }
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>Call on {new Date(transcript.createdAt).toLocaleString()}</Text>
-      <Text style={styles.meta}>
-        {personas.find((p) => p.id === transcript.personaId)?.name ?? "Unknown persona"} ·{" "}
-        {Math.max(1, Math.round(((transcript.durationSec ?? transcript.messages.length * 25) / 60)))} min
-      </Text>
-      <ScrollView style={{ marginTop: 12 }}>
-        {transcript.messages.map((m) => (
-          <Text key={m.id} style={styles.line}>
-            {m.role.toUpperCase()}: {m.text}
-          </Text>
-        ))}
-      </ScrollView>
-
-      <View style={styles.deleteBar}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Delete transcript"
-          onPress={handleDelete}
-          disabled={deleting}
-          style={[styles.deleteButton, deleting && { opacity: 0.6 }]}
-        >
-          <Ionicons name="trash-outline" size={18} color={colors.primaryText} />
-          <Text style={styles.deleteText}>{deleting ? "Deleting..." : "Delete transcript"}</Text>
-        </Pressable>
+    <>
+      <Stack.Screen
+        options={{
+          headerRight: () => (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Delete transcript"
+              onPress={handleDelete}
+              disabled={deleting}
+              style={{ paddingHorizontal: 8 }}
+            >
+              <Ionicons
+                name="trash-outline"
+                size={22}
+                color={deleting ? colors.textMuted : colors.textMain}
+              />
+            </Pressable>
+          )
+        }}
+      />
+      <View style={styles.container}>
+        <Text style={styles.title}>Call on {new Date(transcript.createdAt).toLocaleString()}</Text>
+        <Text style={styles.meta}>
+          {personas.find((p) => p.id === transcript.personaId)?.name ?? "Unknown persona"} ·{" "}
+          {Math.max(1, Math.round(((transcript.durationSec ?? transcript.messages.length * 25) / 60)))} min
+        </Text>
+        <ScrollView style={{ marginTop: 12 }}>
+          {transcript.messages.map((m) => (
+            <Text key={m.id} style={styles.line}>
+              {m.role.toUpperCase()}: {m.text}
+            </Text>
+          ))}
+        </ScrollView>
       </View>
-    </View>
+    </>
   );
 }
 
@@ -125,20 +135,6 @@ const createStyles = (colors: ReturnType<typeof useTheme>["colors"]) =>
     container: { flex: 1, padding: 16, backgroundColor: colors.background },
     title: { color: colors.textMain, fontSize: 20, fontWeight: "800" },
     meta: { color: colors.textMuted, marginTop: 6 },
-    line: { color: colors.textMuted, marginBottom: 6 },
-    deleteBar: {
-      marginTop: 16,
-      alignItems: "flex-end"
-    },
-    deleteButton: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 6,
-      backgroundColor: colors.primary,
-      paddingVertical: 10,
-      paddingHorizontal: 14,
-      borderRadius: 10
-    },
-    deleteText: { color: colors.primaryText, fontWeight: "700" }
+    line: { color: colors.textMuted, marginBottom: 6 }
   });
 
