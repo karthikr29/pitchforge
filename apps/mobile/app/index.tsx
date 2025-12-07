@@ -57,8 +57,10 @@ export default function HomeScreen() {
         </Text>
 
         {favorites.length > 0 && (
-          <View style={{ marginTop: 8 }}>
-            <Text style={styles.sectionLabel}>Favorites</Text>
+          <View style={styles.favoritesSection}>
+            <View style={styles.rowHeader}>
+              <Text style={styles.sectionLabel}>Favorites</Text>
+            </View>
             <FlatList
               data={personas.filter((p) => favorites.includes(p.id))}
               horizontal
@@ -79,20 +81,24 @@ export default function HomeScreen() {
           </View>
         )}
 
-      <FlatList
-        data={personas}
-        horizontal
-        keyExtractor={(item) => item.id}
-        showsHorizontalScrollIndicator={false}
-        renderItem={({ item }) => (
-          <PersonaCard
-            persona={item}
-            selected={item.id === personaId}
-            onSelect={setPersona}
+        <View style={[styles.rowHeader, { marginTop: favorites.length > 0 ? 4 : 12 }]}>
+          <Text style={styles.sectionLabel}>All personas</Text>
+        </View>
+
+        <FlatList
+          data={personas}
+          horizontal
+          keyExtractor={(item) => item.id}
+          showsHorizontalScrollIndicator={false}
+          renderItem={({ item }) => (
+            <PersonaCard
+              persona={item}
+              selected={item.id === personaId}
+              onSelect={setPersona}
               favorite={favorites.includes(item.id)}
               onToggleFavorite={toggleFavorite}
-          />
-        )}
+            />
+          )}
           contentContainerStyle={{ paddingHorizontal: 12, paddingVertical: 12 }}
           style={{ flexGrow: 0 }}
         />
@@ -102,12 +108,10 @@ export default function HomeScreen() {
           style={[styles.callButton, !personaId && styles.callButtonDisabled]}
           onPress={() => router.push("/conversation")}
         >
-        <Text style={styles.callText}>
-            {personaId
-              ? `Call ${personas.find((p) => p.id === personaId)?.name}`
-              : "Select Persona"}
-        </Text>
-      </Pressable>
+          <Text style={styles.callText}>
+            {personaId ? `Call ${personas.find((p) => p.id === personaId)?.name}` : "Select Persona"}
+          </Text>
+        </Pressable>
       </View>
 
       <View style={[styles.section, styles.historySection]}>
