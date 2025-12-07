@@ -209,14 +209,19 @@ export default function ConversationScreen() {
 
   const startConversationLoop = async () => {
     while (callActiveRef.current) {
-      // Avoid recording while audio is playing to reduce TTS re-capture.
       if (isPlaying) {
-        await new Promise((res) => setTimeout(res, 300));
+        await new Promise((res) => setTimeout(res, 200));
         continue;
       }
       await startRecording();
-      await new Promise((res) => setTimeout(res, RECORD_WINDOW_MS));
-      if (!callActiveRef.current || isPlaying) {
+      for (let elapsed = 0; elapsed < RECORD_WINDOW_MS && callActiveRef.current; elapsed += 100) {
+        await new Promise((res) => setTimeout(res, 100));
+      }
+      if (!callActiveRef.current) {
+        await stopRecording()?.catch(() => null);
+        break;
+      }
+      if (isPlaying) {
         await stopRecording()?.catch(() => null);
         continue;
       }
@@ -331,16 +336,16 @@ export default function ConversationScreen() {
         </ScrollView>
       </View>
 
-      <Pressable
-        style={[styles.mic, isRecording && styles.micActive]}
-        onPress={handleTap}
-      >
-        <Text style={styles.micText}>
-          {callActive ? (isRecording ? "Listening live…" : "Live call…") : "Start call"}
-        </Text>
-      </Pressable>
+      {!callActive && (
+        <Pressable
+          style={[styles.mic, isRecording && styles.micActive]}
+          onPress={handleTap}
+        >
+          <Text style={styles.micText}>Start call</Text>
+        </Pressable>
+      )}
 
-      {hasActiveConversation && (
+      {(callActive || hasActiveConversation) && (
         <Pressable style={styles.endButton} onPress={handleEndConversation}>
           <Text style={styles.endText}>End conversation</Text>
         </Pressable>

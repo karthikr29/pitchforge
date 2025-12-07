@@ -268,14 +268,47 @@ wss.on("connection", (ws) => {
           }
         }
         sendStatus(ws, "listening");
-        const userText = await transcribeChunk(msg.base64, msg.mime ?? "audio/webm");
+        const userText = (await transcribeChunk(msg.base64, msg.mime ?? "audio/webm"))?.trim() ?? "";
         console.log("[ws] transcript", userText);
+        if (!userText) {
+          const clarify = "I didn't catch that—could you repeat?";
+          transcript.push({ role: "ai", text: clarify, at: new Date().toISOString() });
+          ws.send(JSON.stringify({ type: "text", role: "ai", text: clarify }));
+          try {
+            const tts = await synthesizeTts(clarify);
+            ws.send(JSON.stringify({ type: "tts", ...tts }));
+          } catch (err) {
+            sendError(ws, err?.message ?? String(err));
+          }
+          sendStatus(ws, "speaking");
+          return;
+        }
         transcript.push({ role: "user", text: userText, at: new Date().toISOString() });
 
         // Build context and get model reply
         const rag = await vectorLookup(companyId, userText);
         const ragContext =
           rag?.map((r) => r.content).join("\n---\n") ?? "No company-specific context.";
+
+        const words = userText.split(/\s+/).filter(Boolean);
+        const isShortGreeting = words.length <= 3 && userText.length <= 20;
+        if (isShortGreeting) {
+          const shortReply =
+            persona?.name && persona?.role
+              ? `Hi, this is ${persona.name}. What would you like to cover today?`
+              : "Hi there. What would you like to discuss?";
+          sendStatus(ws, "thinking");
+          transcript.push({ role: "ai", text: shortReply, at: new Date().toISOString() });
+          ws.send(JSON.stringify({ type: "text", role: "ai", text: shortReply }));
+          try {
+            const tts = await synthesizeTts(shortReply);
+            ws.send(JSON.stringify({ type: "tts", ...tts }));
+          } catch (err) {
+            sendError(ws, err?.message ?? String(err));
+          }
+          sendStatus(ws, "speaking");
+          return;
+        }
 
         const systemPrompt = [
           "You are role-playing a sales prospect for training. Stay strictly in character.",

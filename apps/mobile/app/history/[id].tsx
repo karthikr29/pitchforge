@@ -119,8 +119,8 @@ export default function TranscriptScreen() {
           {Math.max(1, Math.round(((transcript.durationSec ?? transcript.messages.length * 25) / 60)))} min
         </Text>
         <ScrollView style={{ marginTop: 12 }}>
-          {transcript.messages.map((m) => (
-            <Text key={m.id} style={styles.line}>
+          {transcript.messages.map((m, idx) => (
+            <Text key={m.id ?? `${m.role}-${idx}`} style={styles.line}>
               {m.role.toUpperCase()}: {m.text}
             </Text>
           ))}
