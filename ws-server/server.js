@@ -227,14 +227,22 @@ wss.on("connection", (ws) => {
   let companyId;
   let startedAt = Date.now();
   let transcript = [];
+  const log = (event, extra = {}) => {
+    const meta = {
+      personaId,
+      conversationId,
+      ...extra
+    };
+    console.log(`[ws] ${event}`, meta);
+  };
 
   sendStatus(ws, "ready");
-  console.log("[ws] connection opened");
+  log("connection opened");
 
   ws.on("message", async (data) => {
     try {
       const raw = data.toString();
-      console.log("[ws] message", raw.slice(0, 120));
+      log("message", { raw: raw.slice(0, 200) });
       const msg = JSON.parse(raw);
       if (msg.type === "ping") {
         ws.send(JSON.stringify({ type: "pong" }));
@@ -250,6 +258,7 @@ wss.on("connection", (ws) => {
           persona = await fetchPersona(personaId);
           sendStatus(ws, "ready");
         } catch (err) {
+          log("persona load failed", { error: err?.message || err });
           sendError(ws, err?.message || "persona load failed");
         }
         return;
@@ -263,13 +272,14 @@ wss.on("connection", (ws) => {
           try {
             persona = await fetchPersona(personaId);
           } catch (err) {
+            log("persona reload failed", { error: err?.message || err });
             sendError(ws, err?.message || "persona load failed");
             return;
           }
         }
         sendStatus(ws, "listening");
         const userText = (await transcribeChunk(msg.base64, msg.mime ?? "audio/webm"))?.trim() ?? "";
-        console.log("[ws] transcript", userText);
+        log("transcript", { text: userText?.slice(0, 400) });
         if (!userText) {
           const clarify = "I didn't catch that—could you repeat?";
           transcript.push({ role: "ai", text: clarify, at: new Date().toISOString() });
@@ -278,6 +288,7 @@ wss.on("connection", (ws) => {
             const tts = await synthesizeTts(clarify);
             ws.send(JSON.stringify({ type: "tts", ...tts }));
           } catch (err) {
+            log("tts clarify failed", { error: err?.message || err });
             sendError(ws, err?.message ?? String(err));
           }
           sendStatus(ws, "speaking");
@@ -298,12 +309,14 @@ wss.on("connection", (ws) => {
               ? `Hi, this is ${persona.name}. What would you like to cover today?`
               : "Hi there. What would you like to discuss?";
           sendStatus(ws, "thinking");
+          log("reply short greeting", { shortReply });
           transcript.push({ role: "ai", text: shortReply, at: new Date().toISOString() });
           ws.send(JSON.stringify({ type: "text", role: "ai", text: shortReply }));
           try {
             const tts = await synthesizeTts(shortReply);
             ws.send(JSON.stringify({ type: "tts", ...tts }));
           } catch (err) {
+            log("tts short greeting failed", { error: err?.message || err });
             sendError(ws, err?.message ?? String(err));
           }
           sendStatus(ws, "speaking");
@@ -328,6 +341,7 @@ wss.on("connection", (ws) => {
         ];
 
         sendStatus(ws, "thinking");
+        log("llm start", { words: words.length });
 
         let fullResponse = "";
         try {
@@ -336,17 +350,22 @@ wss.on("connection", (ws) => {
             ws.send(JSON.stringify({ type: "text", role: "ai", text: chunk }));
           });
         } catch (err) {
+          log("llm error", { error: err?.message || err });
           sendError(ws, err?.message ?? String(err));
         }
 
         if (fullResponse.trim()) {
+          log("llm done", { chars: fullResponse.length });
           transcript.push({ role: "ai", text: fullResponse.trim(), at: new Date().toISOString() });
           try {
             const tts = await synthesizeTts(fullResponse);
             ws.send(JSON.stringify({ type: "tts", ...tts }));
           } catch (err) {
+            log("tts full response failed", { error: err?.message || err });
             sendError(ws, err?.message ?? String(err));
           }
+        } else {
+          log("llm empty response");
         }
 
         sendStatus(ws, "speaking");
@@ -365,12 +384,13 @@ wss.on("connection", (ws) => {
         return;
       }
     } catch (err) {
+      log("message error", { error: err?.message || err });
       sendError(ws, err?.message || "invalid message");
     }
   });
 
   ws.on("close", () => {
-    console.log("[ws] connection closed");
+    log("connection closed");
   });
 });
 
