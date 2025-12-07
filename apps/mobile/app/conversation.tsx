@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { View, Text, Pressable, StyleSheet, Alert, ScrollView, Animated } from "react-native";
 import { Audio } from "expo-av";
-import * as FileSystem from "expo-file-system";
+// Use legacy FS API to avoid deprecated readAsStringAsync warnings.
+import * as FileSystem from "expo-file-system/legacy";
 import * as Haptics from "expo-haptics";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useRouter } from "expo-router";
 import { v4 as uuidv4 } from "uuid";
 import { personas } from "../src/constants/personas";
-import { streamVoiceSession, synthesizeTts } from "../src/api/client";
+import { synthesizeTts } from "../src/api/client";
+import { VoiceWsClient } from "../src/api/voiceWs";
 import { splitBufferedText } from "../src/utils/sentenceSplitter";
 import { AudioQueue, cacheTtsToFile } from "../src/utils/audioQueue";
 import { useSessionStore } from "../src/state/useSessionStore";
@@ -15,6 +17,7 @@ import { Message } from "../src/types";
 import { useTheme } from "../src/context/ThemeContext";
 
 const audioQueue = new AudioQueue();
+const RECORD_WINDOW_MS = 2000;
 
 export default function ConversationScreen() {
   const router = useRouter();
@@ -40,7 +43,9 @@ export default function ConversationScreen() {
   const recordingPrepareRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const bufferRef = useRef<string>("");
-  const [loading, setLoading] = useState(false);
+  const callActiveRef = useRef(false);
+  const [callActive, setCallActive] = useState(false);
+  const wsRef = useRef<VoiceWsClient | null>(null);
   const { colors } = useTheme();
   const styles = useMemo(
     () => createStyles(colors, isRecording, isPlaying),
@@ -93,6 +98,13 @@ export default function ConversationScreen() {
     return base64;
   };
 
+  const saveBase64Audio = async (base64: string, mime: string) => {
+    const ext = mime.includes("wav") ? "wav" : mime.includes("webm") ? "webm" : "mp3";
+    const path = `${FileSystem.cacheDirectory}tts-${uuidv4()}.${ext}`;
+    await FileSystem.writeAsStringAsync(path, base64, { encoding: "base64" });
+    return path;
+  };
+
   const enqueueSentences = async (sentences: string[]) => {
     for (const sentence of sentences) {
       try {
@@ -113,9 +125,8 @@ export default function ConversationScreen() {
     }
   };
 
-  const handleSend = async () => {
+  const handleSendChunk = async () => {
     try {
-      setLoading(true);
       ensureConversation();
       const base64 = await stopRecording();
       if (!base64) return;
@@ -127,52 +138,80 @@ export default function ConversationScreen() {
       };
       addMessage(userMessage);
 
-      abortRef.current = new AbortController();
-      const signal = abortRef.current.signal;
-      bufferRef.current = "";
-
-      await streamVoiceSession(
-        {
-          audioBase64: base64,
-          personaId: personaId!,
-          conversationId: conversationId ?? undefined
-        },
-        {
-          signal,
-          onText: async (chunk) => {
-            appendStreamingText(chunk.text);
-            const { sentences, remainder } = splitBufferedText(bufferRef.current + chunk.text);
-            bufferRef.current = remainder;
-            if (sentences.length) {
-              const aiMessage: Message = {
-                id: uuidv4(),
-                role: "ai",
-                text: sentences.join(" "),
-                createdAt: new Date().toISOString()
-              };
-              addMessage(aiMessage);
-              await enqueueSentences(sentences);
-              clearStreamingText();
-            }
-          },
-          onError: (message) => Alert.alert("Stream error", message),
-          onDone: () => {
-            clearStreamingText();
-            setLoading(false);
-          }
-        }
-      );
+      const ws = wsRef.current;
+      if (ws) {
+        ws.sendAudio(uuidv4(), "audio/webm", base64);
+      } else {
+        Alert.alert("Conversation failed", "Voice channel not connected");
+      }
     } catch (err: any) {
       Alert.alert("Conversation failed", err?.message ?? String(err));
-      setLoading(false);
     }
   };
 
   const handleTap = async () => {
-    if (isRecording) {
-      await handleSend();
-    } else {
+    if (callActive) {
+      await handleEndConversation();
+      return;
+    }
+    if (!personaId) {
+      Alert.alert("Select a persona first");
+      return;
+    }
+
+    const ws = new VoiceWsClient({
+      onText: (text) => {
+        appendStreamingText(text);
+        const { sentences, remainder } = splitBufferedText(bufferRef.current + text);
+        bufferRef.current = remainder;
+        if (sentences.length) {
+          const aiMessage: Message = {
+            id: uuidv4(),
+            role: "ai",
+            text: sentences.join(" "),
+            createdAt: new Date().toISOString()
+          };
+          addMessage(aiMessage);
+          enqueueSentences(sentences);
+          clearStreamingText();
+        }
+      },
+      onTts: async ({ base64, mime }) => {
+        try {
+          const path = await saveBase64Audio(base64, mime);
+          audioQueue.enqueue({ id: uuidv4(), uri: path, text: "" });
+          setQueue(audioQueue.items());
+          if (!audioQueue.isEmpty()) {
+            setPlaying(true);
+            await audioQueue.playNext(() => {
+              setQueue(audioQueue.items());
+              setPlaying(!audioQueue.isEmpty());
+            });
+          }
+        } catch (err) {
+          console.warn("TTS playback failed", err);
+        }
+      },
+      onStatus: (value) => {
+        // could map to UI status if desired
+      },
+      onError: (message) => Alert.alert("Conversation failed", message)
+    });
+
+    ws.connect({ personaId, conversationId: conversationId ?? undefined });
+    wsRef.current = ws;
+
+    callActiveRef.current = true;
+    setCallActive(true);
+    startConversationLoop();
+  };
+
+  const startConversationLoop = async () => {
+    while (callActiveRef.current) {
       await startRecording();
+      await new Promise((res) => setTimeout(res, RECORD_WINDOW_MS));
+      if (!callActiveRef.current) break;
+      await handleSendChunk();
     }
   };
 
@@ -196,6 +235,10 @@ export default function ConversationScreen() {
   };
 
   const handleEndConversation = async () => {
+    callActiveRef.current = false;
+    setCallActive(false);
+    wsRef.current?.stop();
+    wsRef.current = null;
     await handleInterrupt();
     await persistTranscript();
     resetSession();
@@ -218,7 +261,7 @@ export default function ConversationScreen() {
     await AsyncStorage.setItem("transcripts", JSON.stringify(next));
   };
 
-  const hasActiveConversation = isPlaying || messages.length > 0 || !!streamingText;
+  const hasActiveConversation = callActive || isPlaying || messages.length > 0 || !!streamingText;
 
   return (
     <View style={styles.container}>
@@ -282,15 +325,14 @@ export default function ConversationScreen() {
       <Pressable
         style={[styles.mic, isRecording && styles.micActive]}
         onPress={handleTap}
-        disabled={loading}
       >
         <Text style={styles.micText}>
-          {isRecording ? "Listening… tap to send" : "Tap to Talk"}
+          {callActive ? (isRecording ? "Listening live…" : "Live call…") : "Start call"}
         </Text>
       </Pressable>
 
       {hasActiveConversation && (
-        <Pressable style={styles.endButton} onPress={handleEndConversation} disabled={loading}>
+        <Pressable style={styles.endButton} onPress={handleEndConversation}>
           <Text style={styles.endText}>End conversation</Text>
         </Pressable>
       )}

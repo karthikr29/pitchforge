@@ -21,7 +21,11 @@ export class VoiceWsClient {
   constructor(handlers: Handlers) {
     const extra = (Constants.expoConfig?.extra as any) || {};
     const base = extra.wsBaseUrl || extra.apiBaseUrl || "";
-    this.url = base.replace(/^http/, "ws") + "/voice-session-ws";
+    // Convert http/https to the correct ws/wss scheme; the previous string replace
+    // would convert https -> ws (dropping TLS) which causes handshake failures on iOS.
+    const url = new URL(base);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    this.url = `${url.toString().replace(/\/$/, "")}/voice-session-ws`;
     this.handlers = handlers;
   }
 

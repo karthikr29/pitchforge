@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { View, Text, FlatList, StyleSheet, Pressable, ScrollView } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useRouter } from "expo-router";
+import { useFocusEffect } from "@react-navigation/native";
 import { PersonaCard } from "../src/components/PersonaCard";
 import { personas } from "../src/constants/personas";
 import { useSessionStore } from "../src/state/useSessionStore";
@@ -19,6 +20,16 @@ export default function HomeScreen() {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
+  const loadHistory = useCallback(async () => {
+    const raw = await AsyncStorage.getItem("transcripts");
+    if (!raw) {
+      setHistory([]);
+      return;
+    }
+    const parsed: TranscriptEntry[] = JSON.parse(raw);
+    setHistory(parsed.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)));
+  }, []);
+
   useEffect(() => {
     (async () => {
       try {
@@ -33,14 +44,11 @@ export default function HomeScreen() {
     })();
   }, [setRemainingMinutes]);
 
-  useEffect(() => {
-    (async () => {
-      const raw = await AsyncStorage.getItem("transcripts");
-      if (!raw) return;
-      const parsed: TranscriptEntry[] = JSON.parse(raw);
-      setHistory(parsed.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)));
-    })();
-  }, []);
+  useFocusEffect(
+    useCallback(() => {
+      loadHistory();
+    }, [loadHistory])
+  );
 
   const hasFavorites = favorites.length > 0;
 

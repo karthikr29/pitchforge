@@ -1,5 +1,5 @@
 import { Audio } from "expo-av";
-import * as FileSystem from "expo-file-system";
+import * as FileSystem from "expo-file-system/legacy";
 import { encode as btoa } from "base-64";
 import { AudioItem } from "../types";
 
@@ -65,7 +65,7 @@ export async function cacheTtsToFile(id: string, arrayBuffer: ArrayBuffer) {
   const path = `${FileSystem.cacheDirectory}tts-${id}.mp3`;
   const base64 = arrayBufferToBase64(arrayBuffer);
   await FileSystem.writeAsStringAsync(path, base64, {
-    encoding: FileSystem.EncodingType.Base64
+    encoding: "base64"
   });
   return path;
 }
