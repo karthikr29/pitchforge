@@ -7,6 +7,7 @@ import { PersonaCard } from "../src/components/PersonaCard";
 import { personas } from "../src/constants/personas";
 import { useSessionStore } from "../src/state/useSessionStore";
 import { fetchMinutes } from "../src/api/client";
+import { fetchTranscriptsRemote, TranscriptEntryRemote } from "../src/api/transcripts";
 import { useTheme } from "../src/context/ThemeContext";
 import { Message } from "../src/types";
 import { Ionicons } from "@expo/vector-icons";
@@ -20,7 +21,23 @@ export default function HomeScreen() {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
+  const mapRemote = (remote: TranscriptEntryRemote): TranscriptEntry => ({
+    id: remote.id,
+    createdAt: remote.created_at,
+    messages: remote.messages ?? [],
+    personaId: remote.persona_id,
+    durationSec: remote.duration_sec
+  });
+
   const loadHistory = useCallback(async () => {
+    try {
+      const remote = await fetchTranscriptsRemote();
+      setHistory(remote.map(mapRemote));
+      await AsyncStorage.setItem("transcripts", JSON.stringify(remote.map(mapRemote)));
+      return;
+    } catch {
+      // fallback to local cache
+    }
     const raw = await AsyncStorage.getItem("transcripts");
     if (!raw) {
       setHistory([]);
@@ -175,7 +192,13 @@ function HistoryCard({ entry, onPress }: { entry: TranscriptEntry; onPress: () =
         <Text style={styles.historyRating}>{"⭐".repeat(Math.max(3, Math.min(5, rating)))}</Text>
       </View>
       <Text style={styles.historyMeta}>
-        {durationMin} min · {new Date(entry.createdAt).toLocaleDateString()}
+        {durationMin} min ·{" "}
+        {new Date(entry.createdAt).toLocaleString(undefined, {
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit"
+        })}
       </Text>
       <Text style={styles.historySub}>Tap to view transcript</Text>
     </Pressable>

@@ -209,9 +209,17 @@ export default function ConversationScreen() {
 
   const startConversationLoop = async () => {
     while (callActiveRef.current) {
+      // Avoid recording while audio is playing to reduce TTS re-capture.
+      if (isPlaying) {
+        await new Promise((res) => setTimeout(res, 300));
+        continue;
+      }
       await startRecording();
       await new Promise((res) => setTimeout(res, RECORD_WINDOW_MS));
-      if (!callActiveRef.current) break;
+      if (!callActiveRef.current || isPlaying) {
+        await stopRecording()?.catch(() => null);
+        continue;
+      }
       await handleSendChunk();
     }
   };

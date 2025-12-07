@@ -7,6 +7,7 @@ import { Swipeable } from "react-native-gesture-handler";
 import { Message } from "../../src/types";
 import { personas } from "../../src/constants/personas";
 import { useTheme } from "../../src/context/ThemeContext";
+import { fetchTranscriptsRemote, TranscriptEntryRemote } from "../../src/api/transcripts";
 
 type Transcript = {
   id: string;
@@ -24,7 +25,24 @@ export default function HistoryList() {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
+  const mapRemote = (remote: TranscriptEntryRemote): Transcript => ({
+    id: remote.id,
+    createdAt: remote.created_at,
+    messages: remote.messages ?? [],
+    personaId: remote.persona_id,
+    durationSec: remote.duration_sec,
+    rating: 4
+  });
+
   const loadTranscripts = useCallback(async () => {
+    try {
+      const remote = await fetchTranscriptsRemote();
+      setData(remote.map(mapRemote));
+      await AsyncStorage.setItem("transcripts", JSON.stringify(remote.map(mapRemote)));
+      return;
+    } catch {
+      // fallback to local cache
+    }
     const raw = await AsyncStorage.getItem("transcripts");
     if (!raw) {
       setData([]);
@@ -77,7 +95,13 @@ export default function HistoryList() {
                 {personas.find((p) => p.id === item.personaId)?.name ?? "Unknown persona"}
               </Text>
               <Text style={styles.subText}>
-                {new Date(item.createdAt).toLocaleString()} · {Math.max(1, Math.round(((item.durationSec ?? item.messages.length * 25) / 60)))} min
+                {new Date(item.createdAt).toLocaleString(undefined, {
+                  month: "short",
+                  day: "numeric",
+                  hour: "numeric",
+                  minute: "2-digit"
+                })}{" "}
+                · {Math.max(1, Math.round(((item.durationSec ?? item.messages.length * 25) / 60)))} min
               </Text>
             </Pressable>
           </Swipeable>

@@ -1,4 +1,5 @@
 const express = require("express");
+const crypto = require("crypto");
 const { WebSocketServer } = require("ws");
 
 // Render injects PORT; default to 10000 for local dev.
@@ -8,7 +9,6 @@ const openaiKey = process.env.OPENAI_API_KEY;
 const openrouterKey = process.env.OPENROUTER_API_KEY;
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const echoOnly = (process.env.ECHO_ONLY || "true").toLowerCase() === "true";
 
 const app = express();
 
@@ -166,6 +166,40 @@ function sendDone(ws) {
   ws.send(JSON.stringify({ type: "done" }));
 }
 
+async function persistTranscript({
+  conversationId,
+  personaId,
+  companyId,
+  messages,
+  startedAtMs
+}) {
+  if (!supabaseUrl || !supabaseServiceKey) return;
+  try {
+    const durationSec = Math.max(1, Math.round((Date.now() - startedAtMs) / 1000));
+    const res = await fetch(`${supabaseUrl}/rest/v1/transcripts`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: supabaseServiceKey,
+        Authorization: `Bearer ${supabaseServiceKey}`,
+        Prefer: "return=minimal"
+      },
+      body: JSON.stringify({
+        id: conversationId,
+        persona_id: personaId,
+        company_id: companyId,
+        messages,
+        duration_sec: durationSec
+      })
+    });
+    if (!res.ok) {
+      console.warn("[ws] persist transcript failed", res.status, await res.text());
+    }
+  } catch (err) {
+    console.warn("[ws] persist transcript error", err?.message || err);
+  }
+}
+
 // Attach WebSocket server at /voice-session-ws
 const wss = new WebSocketServer({ server, path: "/voice-session-ws" });
 
@@ -173,6 +207,8 @@ wss.on("connection", (ws) => {
   let personaId;
   let conversationId;
   let companyId;
+  let startedAt = Date.now();
+  let transcript = [];
 
   sendStatus(ws, "ready");
   console.log("[ws] connection opened");
@@ -188,8 +224,10 @@ wss.on("connection", (ws) => {
       }
       if (msg.type === "start") {
         personaId = msg.personaId;
-        conversationId = msg.conversationId;
+        conversationId = msg.conversationId || crypto.randomUUID();
         companyId = msg.companyId;
+        startedAt = Date.now();
+        transcript = [];
         sendStatus(ws, "ready");
         return;
       }
@@ -201,46 +239,36 @@ wss.on("connection", (ws) => {
         sendStatus(ws, "listening");
         const userText = await transcribeChunk(msg.base64, msg.mime ?? "audio/webm");
         console.log("[ws] transcript", userText);
+        transcript.push({ role: "user", text: userText, at: new Date().toISOString() });
 
-        // Always send transcript back as text so client can display it.
-        ws.send(JSON.stringify({ type: "text", role: "ai", text: userText }));
+        // Build context and get model reply
+        const rag = await vectorLookup(companyId, userText);
+        const ragContext =
+          rag?.map((r) => r.content).join("\n---\n") ?? "No company-specific context.";
 
-        if (!echoOnly) {
-          const rag = await vectorLookup(companyId, userText);
-          const ragContext =
-            rag?.map((r) => r.content).join("\n---\n") ?? "No company-specific context.";
+        const prompt = [
+          `Persona: ${personaId}`,
+          "Use the following context if relevant:",
+          ragContext,
+          `User said: ${userText}`
+        ].join("\n\n");
 
-          const prompt = [
-            `Persona: ${personaId}`,
-            "Use the following context if relevant:",
-            ragContext,
-            `User said: ${userText}`
-          ].join("\n\n");
+        sendStatus(ws, "thinking");
 
-          sendStatus(ws, "thinking");
+        let fullResponse = "";
+        try {
+          await streamLLM(prompt, (chunk) => {
+            fullResponse += chunk;
+            ws.send(JSON.stringify({ type: "text", role: "ai", text: chunk }));
+          });
+        } catch (err) {
+          sendError(ws, err?.message ?? String(err));
+        }
 
-          let fullResponse = "";
+        if (fullResponse.trim()) {
+          transcript.push({ role: "ai", text: fullResponse.trim(), at: new Date().toISOString() });
           try {
-            await streamLLM(prompt, (chunk) => {
-              fullResponse += chunk;
-              ws.send(JSON.stringify({ type: "text", role: "ai", text: chunk }));
-            });
-          } catch (err) {
-            sendError(ws, err?.message ?? String(err));
-          }
-
-          if (fullResponse.trim()) {
-            try {
-              const tts = await synthesizeTts(fullResponse);
-              ws.send(JSON.stringify({ type: "tts", ...tts }));
-            } catch (err) {
-              sendError(ws, err?.message ?? String(err));
-            }
-          }
-        } else {
-          // Echo-only: send TTS of the transcript itself so user hears it back.
-          try {
-            const tts = await synthesizeTts(userText);
+            const tts = await synthesizeTts(fullResponse);
             ws.send(JSON.stringify({ type: "tts", ...tts }));
           } catch (err) {
             sendError(ws, err?.message ?? String(err));
@@ -251,6 +279,13 @@ wss.on("connection", (ws) => {
         return;
       }
       if (msg.type === "stop") {
+        await persistTranscript({
+          conversationId: conversationId || crypto.randomUUID(),
+          personaId,
+          companyId,
+          messages: transcript,
+          startedAtMs: startedAt
+        });
         sendDone(ws);
         ws.close(1000, "client stop");
         return;

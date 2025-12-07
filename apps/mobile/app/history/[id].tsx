@@ -5,6 +5,7 @@ import { useLocalSearchParams } from "expo-router";
 import { Message } from "../../src/types";
 import { personas } from "../../src/constants/personas";
 import { useTheme } from "../../src/context/ThemeContext";
+import { fetchTranscriptRemote } from "../../src/api/transcripts";
 
 type Transcript = {
   id: string;
@@ -23,6 +24,21 @@ export default function TranscriptScreen() {
 
   useEffect(() => {
     (async () => {
+      try {
+        const remote = await fetchTranscriptRemote(id);
+        if (remote) {
+          setTranscript({
+            id: remote.id,
+            createdAt: remote.created_at,
+            messages: remote.messages ?? [],
+            personaId: remote.persona_id,
+            durationSec: remote.duration_sec
+          });
+          return;
+        }
+      } catch {
+        // fallback
+      }
       const raw = await AsyncStorage.getItem("transcripts");
       if (!raw) return;
       const parsed: Transcript[] = JSON.parse(raw);
