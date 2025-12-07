@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { View, Text, StyleSheet, ScrollView } from "react-native";
+import { View, Text, StyleSheet, ScrollView, Pressable, Alert } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useLocalSearchParams } from "expo-router";
 import { Message } from "../../src/types";
 import { personas } from "../../src/constants/personas";
 import { useTheme } from "../../src/context/ThemeContext";
-import { fetchTranscriptRemote } from "../../src/api/transcripts";
+import { deleteTranscriptRemote, fetchTranscriptRemote } from "../../src/api/transcripts";
+import { Ionicons } from "@expo/vector-icons";
 
 type Transcript = {
   id: string;
@@ -19,6 +20,7 @@ type Transcript = {
 export default function TranscriptScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const [transcript, setTranscript] = useState<Transcript | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
@@ -46,6 +48,39 @@ export default function TranscriptScreen() {
     })();
   }, [id]);
 
+  const removeLocal = async () => {
+    const raw = await AsyncStorage.getItem("transcripts");
+    if (!raw) return;
+    const parsed: Transcript[] = JSON.parse(raw);
+    const next = parsed.filter((t) => t.id !== id);
+    await AsyncStorage.setItem("transcripts", JSON.stringify(next));
+  };
+
+  const handleDelete = async () => {
+    if (!id || deleting) return;
+    Alert.alert("Delete transcript?", "This will remove it permanently.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            setDeleting(true);
+            await deleteTranscriptRemote(id);
+            await removeLocal();
+            Alert.alert("Deleted", "Transcript removed");
+            // Navigate back; using history.back via router.replace to be safe
+            // but we don't have router here; fallback to Alert and let user go back.
+          } catch (err: any) {
+            Alert.alert("Delete failed", err?.message ?? String(err));
+          } finally {
+            setDeleting(false);
+          }
+        }
+      }
+    ]);
+  };
+
   if (!transcript) {
     return (
       <View style={styles.container}>
@@ -68,6 +103,19 @@ export default function TranscriptScreen() {
           </Text>
         ))}
       </ScrollView>
+
+      <View style={styles.deleteBar}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Delete transcript"
+          onPress={handleDelete}
+          disabled={deleting}
+          style={[styles.deleteButton, deleting && { opacity: 0.6 }]}
+        >
+          <Ionicons name="trash-outline" size={18} color={colors.primaryText} />
+          <Text style={styles.deleteText}>{deleting ? "Deleting..." : "Delete transcript"}</Text>
+        </Pressable>
+      </View>
     </View>
   );
 }
@@ -77,6 +125,20 @@ const createStyles = (colors: ReturnType<typeof useTheme>["colors"]) =>
     container: { flex: 1, padding: 16, backgroundColor: colors.background },
     title: { color: colors.textMain, fontSize: 20, fontWeight: "800" },
     meta: { color: colors.textMuted, marginTop: 6 },
-    line: { color: colors.textMuted, marginBottom: 6 }
+    line: { color: colors.textMuted, marginBottom: 6 },
+    deleteBar: {
+      marginTop: 16,
+      alignItems: "flex-end"
+    },
+    deleteButton: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      backgroundColor: colors.primary,
+      paddingVertical: 10,
+      paddingHorizontal: 14,
+      borderRadius: 10
+    },
+    deleteText: { color: colors.primaryText, fontWeight: "700" }
   });
 

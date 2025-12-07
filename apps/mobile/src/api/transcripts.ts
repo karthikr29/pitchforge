@@ -53,3 +53,21 @@ export async function fetchTranscriptRemote(id: string): Promise<TranscriptEntry
   return data?.[0] ?? null;
 }
 
+export async function deleteTranscriptRemote(id: string): Promise<void> {
+  const headers = {
+    ...authHeaders(),
+    Prefer: "return=minimal"
+  };
+  const res = await fetch(
+    `${supabaseUrl}/rest/v1/transcripts?id=eq.${encodeURIComponent(id)}`,
+    {
+      method: "DELETE",
+      headers
+    }
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Transcript delete failed (${res.status}) ${text}`);
+  }
+}
+
