@@ -8,6 +8,7 @@ const openaiKey = process.env.OPENAI_API_KEY;
 const openrouterKey = process.env.OPENROUTER_API_KEY;
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const echoOnly = (process.env.ECHO_ONLY || "true").toLowerCase() === "true";
 
 const app = express();
 
@@ -171,10 +172,13 @@ wss.on("connection", (ws) => {
   let companyId;
 
   sendStatus(ws, "ready");
+  console.log("[ws] connection opened");
 
   ws.on("message", async (data) => {
     try {
-      const msg = JSON.parse(data.toString());
+      const raw = data.toString();
+      console.log("[ws] message", raw.slice(0, 120));
+      const msg = JSON.parse(raw);
       if (msg.type === "ping") {
         ws.send(JSON.stringify({ type: "pong" }));
         return;
@@ -193,33 +197,47 @@ wss.on("connection", (ws) => {
         }
         sendStatus(ws, "listening");
         const userText = await transcribeChunk(msg.base64, msg.mime ?? "audio/webm");
+        console.log("[ws] transcript", userText);
 
-        const rag = await vectorLookup(companyId, userText);
-        const ragContext =
-          rag?.map((r) => r.content).join("\n---\n") ?? "No company-specific context.";
+        // Always send transcript back as text so client can display it.
+        ws.send(JSON.stringify({ type: "text", role: "ai", text: userText }));
 
-        const prompt = [
-          `Persona: ${personaId}`,
-          "Use the following context if relevant:",
-          ragContext,
-          `User said: ${userText}`
-        ].join("\n\n");
+        if (!echoOnly) {
+          const rag = await vectorLookup(companyId, userText);
+          const ragContext =
+            rag?.map((r) => r.content).join("\n---\n") ?? "No company-specific context.";
 
-        sendStatus(ws, "thinking");
+          const prompt = [
+            `Persona: ${personaId}`,
+            "Use the following context if relevant:",
+            ragContext,
+            `User said: ${userText}`
+          ].join("\n\n");
 
-        let fullResponse = "";
-        try {
-          await streamLLM(prompt, (chunk) => {
-            fullResponse += chunk;
-            ws.send(JSON.stringify({ type: "text", role: "ai", text: chunk }));
-          });
-        } catch (err) {
-          sendError(ws, err?.message ?? String(err));
-        }
+          sendStatus(ws, "thinking");
 
-        if (fullResponse.trim()) {
+          let fullResponse = "";
           try {
-            const tts = await synthesizeTts(fullResponse);
+            await streamLLM(prompt, (chunk) => {
+              fullResponse += chunk;
+              ws.send(JSON.stringify({ type: "text", role: "ai", text: chunk }));
+            });
+          } catch (err) {
+            sendError(ws, err?.message ?? String(err));
+          }
+
+          if (fullResponse.trim()) {
+            try {
+              const tts = await synthesizeTts(fullResponse);
+              ws.send(JSON.stringify({ type: "tts", ...tts }));
+            } catch (err) {
+              sendError(ws, err?.message ?? String(err));
+            }
+          }
+        } else {
+          // Echo-only: send TTS of the transcript itself so user hears it back.
+          try {
+            const tts = await synthesizeTts(userText);
             ws.send(JSON.stringify({ type: "tts", ...tts }));
           } catch (err) {
             sendError(ws, err?.message ?? String(err));
@@ -240,7 +258,7 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
-    // cleanup if needed
+    console.log("[ws] connection closed");
   });
 });
 
