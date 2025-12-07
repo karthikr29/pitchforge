@@ -16,7 +16,7 @@ type StoreState = {
 };
 
 type StoreActions = {
-  setPersona: (id: string) => void;
+  setPersona: (id: string | null) => void;
   startConversation: (conversationId: string) => void;
   addMessage: (message: Message) => void;
   setStreamingText: (text: string) => void;

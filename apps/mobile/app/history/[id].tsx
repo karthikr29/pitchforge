@@ -8,7 +8,6 @@ import { Message } from "../../src/types";
 import { personas } from "../../src/constants/personas";
 import { useTheme } from "../../src/context/ThemeContext";
 import { deleteTranscriptRemote, fetchTranscriptRemote } from "../../src/api/transcripts";
-import { Ionicons } from "@expo/vector-icons";
 
 type Transcript = {
   id: string;
@@ -103,32 +102,7 @@ export default function TranscriptScreen() {
 
   return (
     <>
-      <Stack.Screen
-        options={{
-          headerRight: () => (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Delete transcript"
-              onPress={handleDelete}
-              disabled={deleting}
-              style={{
-                width: 40,
-                height: 24,
-                marginRight: 4,
-                marginLeft: 4,
-                alignItems: "center",
-                justifyContent: "center"
-              }}
-            >
-              <Ionicons
-                name="trash-outline"
-                size={22}
-                color={deleting ? colors.textMuted : colors.textMain}
-              />
-            </Pressable>
-          )
-        }}
-      />
+      <Stack.Screen options={{}} />
       <View style={styles.container}>
         <Text style={styles.title}>Call on {new Date(transcript.createdAt).toLocaleString()}</Text>
         <Text style={styles.meta}>
@@ -147,9 +121,18 @@ export default function TranscriptScreen() {
             accessibilityRole="button"
             accessibilityLabel="Copy transcript"
             onPress={handleCopy}
-            style={styles.copyButton}
+            style={[styles.actionButton, styles.copyButton]}
           >
             <Text style={styles.copyText}>Copy transcript</Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Delete transcript"
+            onPress={handleDelete}
+            disabled={deleting}
+            style={[styles.actionButton, styles.deleteButton, deleting && styles.deleteButtonDisabled]}
+          >
+            <Text style={styles.deleteText}>Delete</Text>
           </Pressable>
         </View>
       </View>
@@ -170,17 +153,28 @@ const createStyles = (colors: ReturnType<typeof useTheme>["colors"]) =>
     line: { color: colors.textMuted, marginBottom: 6 },
     actions: {
       marginTop: 16,
-      alignItems: "center"
+      flexDirection: "row",
+      justifyContent: "space-between",
+      gap: 12
     },
-    copyButton: {
-      marginTop: 4,
+    actionButton: {
+      flex: 1,
       paddingHorizontal: 18,
       paddingVertical: 12,
       borderRadius: 12,
-      backgroundColor: colors.surface,
       borderWidth: 1,
+      alignItems: "center"
+    },
+    copyButton: {
+      backgroundColor: colors.surface,
       borderColor: colors.border
     },
-    copyText: { color: colors.textMain, fontWeight: "700" }
+    copyText: { color: colors.textMain, fontWeight: "700" },
+    deleteButton: {
+      backgroundColor: "#b00020",
+      borderColor: "#b00020"
+    },
+    deleteButtonDisabled: { opacity: 0.6 },
+    deleteText: { color: "#fff", fontWeight: "700" }
   });
 
