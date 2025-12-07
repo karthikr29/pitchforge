@@ -21,17 +21,31 @@ export async function streamVoiceSession(
   },
   handlers: StreamHandlers
 ) {
-  const res = await fetch(`${BASE_URL}/voice-session`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(payload),
-    signal: handlers.signal
-  });
+  if (!BASE_URL) {
+    handlers.onError?.("API base URL missing. Set expo.extra.apiBaseUrl in app.config.ts");
+    return;
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}/voice-session`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload),
+      signal: handlers.signal
+    });
+  } catch (err: any) {
+    handlers.onError?.(`Network error: ${err?.message ?? String(err)}`);
+    return;
+  }
 
   if (!res.ok || !res.body) {
-    handlers.onError?.(`Failed to start stream (${res.status})`);
+    const message = await res.text().catch(() => "");
+    handlers.onError?.(
+      `Failed to start stream (${res.status})${message ? `: ${message}` : ""}`
+    );
     return;
   }
 
