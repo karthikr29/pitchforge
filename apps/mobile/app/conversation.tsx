@@ -18,7 +18,11 @@ import { Message } from "../src/types";
 import { useTheme } from "../src/context/ThemeContext";
 
 const audioQueue = new AudioQueue();
-const RECORD_WINDOW_MS = 2000;
+const MIN_TURN_MS = 600;
+const SILENCE_MS = 900;
+const VAD_THRESHOLD_DB = -45; // meter level; closer to 0 is louder
+const POLL_INTERVAL_MS = 120;
+const MAX_LISTEN_MS = 8000;
 
 export default function ConversationScreen() {
   const router = useRouter();
@@ -45,6 +49,7 @@ export default function ConversationScreen() {
   const abortRef = useRef<AbortController | null>(null);
   const bufferRef = useRef<string>("");
   const callActiveRef = useRef(false);
+  const listeningRef = useRef(false);
   const [callActive, setCallActive] = useState(false);
   const wsRef = useRef<VoiceWsClient | null>(null);
   const { colors } = useTheme();
@@ -59,6 +64,8 @@ export default function ConversationScreen() {
     }
   }, [personaId, router]);
 
+  const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+
   const ensureConversation = () => {
     if (!conversationId) {
       startConversation(uuidv4());
@@ -66,7 +73,7 @@ export default function ConversationScreen() {
   };
 
   const startRecording = async () => {
-    if (recordingPrepareRef.current || recordingRef.current || isRecording) return;
+    if (recordingPrepareRef.current || recordingRef.current || isRecording) return null;
     recordingPrepareRef.current = true;
     try {
       await Audio.requestPermissionsAsync();
@@ -75,11 +82,35 @@ export default function ConversationScreen() {
         playsInSilentModeIOS: true
       });
       const recording = new Audio.Recording();
-      await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      // Enable metering to allow simple VAD.
+      const options: Audio.RecordingOptions = {
+        android: {
+          extension: ".m4a",
+          outputFormat: Audio.RECORDING_OPTION_ANDROID_OUTPUT_FORMAT_MPEG_4,
+          audioEncoder: Audio.RECORDING_OPTION_ANDROID_AUDIO_ENCODER_AAC,
+          sampleRate: 44100,
+          numberOfChannels: 1,
+          bitRate: 128000
+        },
+        ios: {
+          extension: ".m4a",
+          audioQuality: Audio.RECORDING_OPTION_IOS_AUDIO_QUALITY_HIGH,
+          sampleRate: 44100,
+          numberOfChannels: 1,
+          bitRate: 128000,
+          outputFormat: Audio.RECORDING_OPTION_IOS_OUTPUT_FORMAT_MPEG4AAC,
+          meteringEnabled: true
+        },
+        web: {
+          mimeType: "audio/webm"
+        }
+      };
+      await recording.prepareToRecordAsync(options);
       await recording.startAsync();
       recordingRef.current = recording;
       setRecording(true);
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      return recording;
     } finally {
       recordingPrepareRef.current = false;
     }
@@ -129,6 +160,7 @@ export default function ConversationScreen() {
   const stopAllAudio = async () => {
     callActiveRef.current = false;
     setCallActive(false);
+    listeningRef.current = false;
     abortRef.current?.abort();
     wsRef.current?.stop();
     wsRef.current = null;
@@ -148,11 +180,9 @@ export default function ConversationScreen() {
     clearStreamingText();
   };
 
-  const handleSendChunk = async () => {
+  const handleSendChunk = async (base64: string) => {
     try {
       ensureConversation();
-      const base64 = await stopRecording();
-      if (!base64) return;
       const userMessage: Message = {
         id: uuidv4(),
         role: "user",
@@ -172,6 +202,51 @@ export default function ConversationScreen() {
       Alert.alert("Conversation failed", err?.message ?? String(err));
     }
   };
+
+  const startListeningForTurn = useCallback(async () => {
+    if (listeningRef.current || isPlaying || !callActiveRef.current) return;
+    listeningRef.current = true;
+    try {
+      ensureConversation();
+      const recording = await startRecording();
+      if (!recording) {
+        listeningRef.current = false;
+        return;
+      }
+      let heardVoice = false;
+      let lastVoiceAt = Date.now();
+      let lastLevel = -160;
+      const startedAt = Date.now();
+      while (callActiveRef.current && !isPlaying) {
+        const status = await recording.getStatusAsync();
+        const level = status.metering ?? lastLevel;
+        lastLevel = level;
+        if (level > VAD_THRESHOLD_DB) {
+          heardVoice = true;
+          lastVoiceAt = Date.now();
+        }
+        const duration = status.durationMillis ?? 0;
+        const sinceVoice = Date.now() - lastVoiceAt;
+        if (heardVoice && sinceVoice > SILENCE_MS && duration > MIN_TURN_MS) {
+          const base64 = await stopRecording();
+          if (base64) {
+            await handleSendChunk(base64);
+          }
+          return;
+        }
+        if (!heardVoice && Date.now() - startedAt > MAX_LISTEN_MS) {
+          break;
+        }
+        await sleep(POLL_INTERVAL_MS);
+      }
+      await stopRecording()?.catch(() => null);
+    } catch (err) {
+      console.warn("Listen loop failed", err);
+      await stopRecording()?.catch(() => null);
+    } finally {
+      listeningRef.current = false;
+    }
+  }, [handleSendChunk, isPlaying, startRecording]);
 
   const handleTap = async () => {
     if (callActive) {
@@ -227,29 +302,7 @@ export default function ConversationScreen() {
 
     callActiveRef.current = true;
     setCallActive(true);
-    startConversationLoop();
-  };
-
-  const startConversationLoop = async () => {
-    while (callActiveRef.current) {
-      if (isPlaying) {
-        await new Promise((res) => setTimeout(res, 200));
-        continue;
-      }
-      await startRecording();
-      for (let elapsed = 0; elapsed < RECORD_WINDOW_MS && callActiveRef.current; elapsed += 100) {
-        await new Promise((res) => setTimeout(res, 100));
-      }
-      if (!callActiveRef.current) {
-        await stopRecording()?.catch(() => null);
-        break;
-      }
-      if (isPlaying) {
-        await stopRecording()?.catch(() => null);
-        continue;
-      }
-      await handleSendChunk();
-    }
+    startListeningForTurn();
   };
 
   const handleEndConversation = async () => {
@@ -257,6 +310,12 @@ export default function ConversationScreen() {
     await persistTranscript();
     resetSession();
   };
+
+  useEffect(() => {
+    if (callActive && !isPlaying && !listeningRef.current) {
+      startListeningForTurn();
+    }
+  }, [callActive, isPlaying, startListeningForTurn]);
 
   useFocusEffect(
     useCallback(() => {

@@ -53,11 +53,11 @@ async function vectorLookup(companyId: string | undefined, query: string) {
   return data ?? [];
 }
 
-async function transcribeChunk(base64: string) {
+async function transcribeChunk(base64: string, mime = "audio/webm") {
   // NOTE: This uses non-streaming Whisper; for production, swap to streaming ASR if available.
   const audioBytes = toBytesFromBase64(base64);
   const formData = new FormData();
-  formData.append("file", new Blob([audioBytes], { type: "audio/webm" }), "audio.webm");
+  formData.append("file", new Blob([audioBytes], { type: mime }), "audio");
   formData.append("model", "whisper-1");
   const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
@@ -166,6 +166,7 @@ function handleSocket(socket: WebSocket) {
   let companyId: string | undefined;
   let transcriptBuffer = "";
   let persona: any | undefined;
+  let hasUserTurn = false;
 
   socket.addEventListener("message", async (event) => {
     try {
@@ -196,7 +197,8 @@ function handleSocket(socket: WebSocket) {
           }
         }
         socket.send(JSON.stringify({ type: "status", value: "listening" }));
-        const userText = (await transcribeChunk(msg.base64))?.trim() ?? "";
+        const userText = (await transcribeChunk(msg.base64, msg.mime ?? "audio/webm"))?.trim() ?? "";
+        hasUserTurn = hasUserTurn || !!userText;
         if (!userText) {
           const clarify = "I didn't catch that—could you please repeat?";
           socket.send(JSON.stringify({ type: "text", role: "ai", text: clarify }));
@@ -217,7 +219,7 @@ function handleSocket(socket: WebSocket) {
 
         const words = userText.split(/\s+/).filter(Boolean);
         const isShortGreeting = words.length <= 3 && userText.length <= 20;
-        if (isShortGreeting) {
+        if (hasUserTurn && isShortGreeting) {
           const shortReply =
             persona?.name && persona?.role
               ? `Hi, this is ${persona.name}. What would you like to cover today?`
