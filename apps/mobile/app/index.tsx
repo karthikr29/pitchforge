@@ -42,23 +42,14 @@ export default function HomeScreen() {
     })();
   }, []);
 
+  const hasFavorites = favorites.length > 0;
+
   return (
     <View style={styles.container}>
       <View style={[styles.section, styles.topSection]}>
-        <View style={styles.rowHeader}>
-          <Text style={styles.sectionLabel}>Personas</Text>
-          <Pressable onPress={() => router.push("/personas")} hitSlop={8} style={styles.rowLink}>
-            <Text style={styles.rowLinkText}>View all</Text>
-            <Ionicons name="chevron-forward" size={18} color={colors.textMain} />
-          </Pressable>
-        </View>
-        <Text style={[styles.sectionSubtitle, { paddingHorizontal: 12 }]}>
-          Pick who to practice with
-        </Text>
-
-        {favorites.length > 0 && (
-          <View style={styles.favoritesSection}>
-            <View style={styles.rowHeader}>
+        {hasFavorites ? (
+          <>
+            <View style={styles.sectionHeader}>
               <Text style={styles.sectionLabel}>Favorites</Text>
             </View>
             <FlatList
@@ -78,12 +69,19 @@ export default function HomeScreen() {
               contentContainerStyle={{ paddingHorizontal: 12, paddingVertical: 8 }}
               style={{ flexGrow: 0 }}
             />
-          </View>
-        )}
+          </>
+        ) : null}
 
-        <View style={[styles.rowHeader, { marginTop: favorites.length > 0 ? 4 : 12 }]}>
-          <Text style={styles.sectionLabel}>All personas</Text>
+        <View style={[styles.rowHeader, hasFavorites && { marginTop: 4 }]}>
+          <Text style={styles.sectionLabel}>Personas</Text>
+          <Pressable onPress={() => router.push("/personas")} hitSlop={8} style={styles.rowLink}>
+            <Text style={styles.rowLinkText}>View all</Text>
+            <Ionicons name="chevron-forward" size={18} color={colors.textMain} />
+          </Pressable>
         </View>
+        <Text style={[styles.sectionSubtitle, { paddingHorizontal: 12 }]}>
+          Pick who to practice with
+        </Text>
 
         <FlatList
           data={personas}
@@ -109,7 +107,9 @@ export default function HomeScreen() {
           onPress={() => router.push("/conversation")}
         >
           <Text style={styles.callText}>
-            {personaId ? `Call ${personas.find((p) => p.id === personaId)?.name}` : "Select Persona"}
+            {personaId
+              ? `Call ${personas.find((p) => p.id === personaId)?.name}`
+              : "Select Persona"}
           </Text>
         </Pressable>
       </View>
@@ -205,6 +205,10 @@ const createStyles = (colors: ReturnType<typeof useTheme>["colors"]) =>
       color: colors.textMain,
       fontSize: 22,
       fontWeight: "700"
+    },
+    sectionHeader: {
+      paddingHorizontal: 12,
+      marginTop: 8
     },
     sectionSubtitle: {
       color: colors.textMuted,
