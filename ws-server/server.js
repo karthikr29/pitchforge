@@ -425,8 +425,8 @@ wss.on("connection", (ws) => {
           transcript.push({ role: "ai", text: clarify, at: new Date().toISOString() });
           ws.send(JSON.stringify({ type: "text", role: "ai", text: clarify }));
           try {
-            const tts = await deepgramSynthesizeTts(clarify);
-            ws.send(JSON.stringify({ type: "tts", ...tts }));
+            const tts = await deepgramSynthesizeTts(clarify, { personaId, conversationId, stage: "clarify-empty-audio" });
+            ws.send(JSON.stringify({ type: "tts", voiceModel: deepgramTtsVoice, ...tts }));
           } catch (err) {
             log("tts clarify failed", { error: err?.message || err });
             sendError(ws, err?.message ?? String(err));
@@ -435,7 +435,10 @@ wss.on("connection", (ws) => {
           return;
         }
         sendStatus(ws, "listening");
-        const userText = (await deepgramTranscribeRealtime(msg.base64, mime, { personaId, conversationId }))?.trim() ?? "";
+        
+        // Use REST API instead of Realtime for full file chunks to avoid 400 errors with large payloads
+        const userText = (await deepgramTranscribeChunk(msg.base64, mime, { personaId, conversationId }))?.trim() ?? "";
+        
         log("transcript", { text: userText?.slice(0, 400) });
         const normalized = userText.toLowerCase().trim();
         if (!userText) {
