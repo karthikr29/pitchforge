@@ -372,7 +372,8 @@ wss.on("connection", (ws) => {
         }
         const base64Len = msg.base64?.length || 0;
         const mime = msg.mime ?? "audio/m4a";
-        const bytesLen = toBufferFromBase64(msg.base64 || "").length;
+        const bytesBuffer = toBufferFromBase64(msg.base64 || "");
+        const bytesLen = bytesBuffer.length;
         log("audio received", { mime, base64Len, bytesLen });
         if (!bytesLen) {
           const clarify = "I didn't catch that—could you repeat?";

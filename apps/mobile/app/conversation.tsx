@@ -20,7 +20,7 @@ import { useTheme } from "../src/context/ThemeContext";
 const audioQueue = new AudioQueue();
 const MIN_TURN_MS = 600;
 const SILENCE_MS = 900;
-const VAD_THRESHOLD_DB = -45; // meter level; closer to 0 is louder
+const VAD_THRESHOLD_DB = -50; // meter level; closer to 0 is louder; lowered to catch quieter speech
 const POLL_INTERVAL_MS = 120;
 const MAX_LISTEN_MS = 8000;
 
@@ -180,13 +180,15 @@ export default function ConversationScreen() {
     clearStreamingText();
   };
 
-  const handleSendChunk = async (base64: string, heardVoice: boolean) => {
+  const handleSendChunk = async (base64: string, heardVoice: boolean, info?: { durationMs?: number }) => {
     try {
       const minLen = 200; // avoid sending empty/too-short payloads
       if (!heardVoice || !base64 || base64.length < minLen) {
+        console.log("[voice] drop send (no audio)", { heardVoice, len: base64?.length, info });
         Alert.alert("Conversation failed", "No audio detected. Please try again.");
         return;
       }
+      console.log("[voice] send chunk", { len: base64.length, heardVoice, info });
       ensureConversation();
       const userMessage: Message = {
         id: uuidv4(),
@@ -222,29 +224,39 @@ export default function ConversationScreen() {
       let lastVoiceAt = Date.now();
       let lastLevel = -160;
       const startedAt = Date.now();
+      let lastDuration = 0;
       while (callActiveRef.current && !isPlaying) {
         const status = await recording.getStatusAsync();
         const hasMeter = typeof status.metering === "number";
         const level = hasMeter ? (status.metering as number) : lastLevel;
         lastLevel = level;
-        if (hasMeter && level > VAD_THRESHOLD_DB) {
-          heardVoice = true;
-          lastVoiceAt = Date.now();
+        if (hasMeter) {
+          console.log("[voice] meter", { level });
+          if (level > VAD_THRESHOLD_DB) {
+            if (!heardVoice) console.log("[voice] heardVoice flip", { level });
+            heardVoice = true;
+            lastVoiceAt = Date.now();
+          }
         }
         const duration = status.durationMillis ?? 0;
+        lastDuration = duration;
         const sinceVoice = Date.now() - lastVoiceAt;
         // Simulator often reports no metering; fall back to a duration-based send to avoid stalling.
         if (!hasMeter && duration > MIN_TURN_MS + SILENCE_MS) {
           const base64 = await stopRecording();
           if (base64) {
-            await handleSendChunk(base64, true);
+            await handleSendChunk(base64, true, { durationMs: duration });
+          } else {
+            console.log("[voice] drop (no base64, no meter)", { duration });
           }
           return;
         }
         if (heardVoice && sinceVoice > SILENCE_MS && duration > MIN_TURN_MS) {
           const base64 = await stopRecording();
           if (base64) {
-            await handleSendChunk(base64, heardVoice);
+            await handleSendChunk(base64, heardVoice, { durationMs: duration });
+          } else {
+            console.log("[voice] drop (no base64 after voice)", { duration });
           }
           return;
         }
@@ -254,8 +266,10 @@ export default function ConversationScreen() {
         await sleep(POLL_INTERVAL_MS);
       }
       const base64 = await stopRecording().catch(() => null);
-      if (base64 && heardVoice) {
-        await handleSendChunk(base64, heardVoice);
+      if (base64 && (heardVoice || lastDuration > MIN_TURN_MS + SILENCE_MS)) {
+        await handleSendChunk(base64, heardVoice || false, { durationMs: lastDuration });
+      } else {
+        console.log("[voice] drop post-loop", { heardVoice, durationMs: lastDuration, hasBase64: !!base64 });
       }
     } catch (err) {
       console.warn("Listen loop failed", err);
