@@ -13,7 +13,6 @@
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
     "@shopify/flash-list": "2.0.2",
-    "@siteed/expo-audio-studio": "^2.18.1",
     "@tanstack/react-query": "^5.62.6",
     "base-64": "^1.0.0",
     "expo": "54.0.27",
