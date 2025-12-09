@@ -182,6 +182,11 @@ export default function ConversationScreen() {
 
   const handleSendChunk = async (base64: string) => {
     try {
+      const minLen = 200; // avoid sending empty/too-short payloads
+      if (!base64 || base64.length < minLen) {
+        Alert.alert("Conversation failed", "No audio detected. Please try again.");
+        return;
+      }
       ensureConversation();
       const userMessage: Message = {
         id: uuidv4(),
@@ -193,8 +198,8 @@ export default function ConversationScreen() {
 
       const ws = wsRef.current;
       if (ws) {
-        // Expo HIGH_QUALITY records m4a (AAC) on iOS; send correct mime so Whisper accepts it.
-        ws.sendAudio(uuidv4(), "audio/m4a", base64);
+        // Expo HIGH_QUALITY records m4a (AAC) on iOS; Deepgram expects audio/mp4.
+        ws.sendAudio(uuidv4(), "audio/mp4", base64);
       } else {
         Alert.alert("Conversation failed", "Voice channel not connected");
       }

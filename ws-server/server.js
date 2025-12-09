@@ -134,29 +134,33 @@ async function deepgramTranscribeChunk(base64, mime = "audio/m4a") {
 async function deepgramTranscribeRealtime(base64, mime = "audio/m4a") {
   if (!deepgramApiKey) throw new Error("DEEPGRAM_API_KEY not set");
   const audioBytes = toBufferFromBase64(base64);
-  const url = `wss://api.deepgram.com/v1/listen?model=${encodeURIComponent(deepgramSttModel)}&language=en`;
+  const byteLen = audioBytes.length;
+  if (!byteLen) {
+    console.warn("[ws] deepgram realtime skipped (empty audio)", { mime, base64Len: base64?.length || 0 });
+    return "";
+  }
+  const params = new URLSearchParams({
+    model: deepgramSttModel,
+    language: "en",
+    encoding: mime.includes("aac") || mime.includes("m4a") ? "aac" : "linear16",
+    sample_rate: "44100",
+    channels: "1",
+    endpointing: "0" // rely on client-end CloseStream
+  });
+  const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
   return new Promise((resolve, reject) => {
     const dg = new WebSocket(url, {
       headers: { Authorization: `Token ${deepgramApiKey}` }
     });
     let finalText = "";
+    let opened = false;
     const timeout = setTimeout(() => {
       dg.close();
       reject(new Error("Deepgram realtime timeout"));
     }, 15000);
 
     dg.on("open", () => {
-      dg.send(
-        JSON.stringify({
-          type: "configure",
-          encoding: "aac",
-          sample_rate: 44100,
-          channels: 1,
-          model: deepgramSttModel,
-          language: "en",
-          interim_results: false
-        })
-      );
+      opened = true;
       dg.send(audioBytes);
       // Signal end of stream per Deepgram docs
       dg.send(JSON.stringify({ type: "CloseStream" }));
@@ -185,6 +189,10 @@ async function deepgramTranscribeRealtime(base64, mime = "audio/m4a") {
 
     dg.on("close", () => {
       clearTimeout(timeout);
+      if (!opened && !finalText) {
+        reject(new Error("Deepgram connection closed before send"));
+        return;
+      }
       resolve(finalText.trim());
     });
   });
@@ -357,9 +365,26 @@ wss.on("connection", (ws) => {
             return;
           }
         }
+        const base64Len = msg.base64?.length || 0;
+        const mime = msg.mime ?? "audio/m4a";
+        const bytesLen = toBufferFromBase64(msg.base64 || "").length;
+        log("audio received", { mime, base64Len, bytesLen });
+        if (!bytesLen) {
+          const clarify = "I didn't catch that—could you repeat?";
+          transcript.push({ role: "ai", text: clarify, at: new Date().toISOString() });
+          ws.send(JSON.stringify({ type: "text", role: "ai", text: clarify }));
+          try {
+            const tts = await deepgramSynthesizeTts(clarify);
+            ws.send(JSON.stringify({ type: "tts", ...tts }));
+          } catch (err) {
+            log("tts clarify failed", { error: err?.message || err });
+            sendError(ws, err?.message ?? String(err));
+          }
+          sendStatus(ws, "speaking");
+          return;
+        }
         sendStatus(ws, "listening");
-        const userText =
-          (await deepgramTranscribeRealtime(msg.base64, msg.mime ?? "audio/m4a"))?.trim() ?? "";
+        const userText = (await deepgramTranscribeRealtime(msg.base64, mime))?.trim() ?? "";
         log("transcript", { text: userText?.slice(0, 400) });
         const normalized = userText.toLowerCase().trim();
         if (!userText) {
