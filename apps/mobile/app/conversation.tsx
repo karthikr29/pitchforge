@@ -81,26 +81,37 @@ export default function ConversationScreen() {
       console.log("[conversation] recording already preparing, skipping");
       return null;
     }
+    
+    // Clean up any existing recording first
     if (recordingRef.current) {
-      console.log("[conversation] recording already exists, skipping");
-      return null;
-    }
-    if (isRecording) {
-      console.log("[conversation] already recording, skipping");
-      return null;
+      console.log("[conversation] cleaning up existing recording...");
+      try {
+        const status = await recordingRef.current.getStatusAsync();
+        if (status.isRecording) {
+          await recordingRef.current.stopAndUnloadAsync();
+        }
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+      recordingRef.current = null;
+      setRecording(false);
     }
     
     recordingPrepareRef.current = true;
     try {
       // Request permissions
-      const { granted } = await Audio.requestPermissionsAsync();
-      if (!granted) {
+      console.log("[conversation] requesting permissions...");
+      const permissionResponse = await Audio.requestPermissionsAsync();
+      console.log("[conversation] permission response:", permissionResponse.status);
+      
+      if (!permissionResponse.granted) {
         console.warn("[conversation] microphone permission denied");
         Alert.alert("Permission Required", "Microphone access is needed for voice calls");
         return null;
       }
       
-      // Set audio mode
+      // Set audio mode for recording
+      console.log("[conversation] setting audio mode...");
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
@@ -109,35 +120,45 @@ export default function ConversationScreen() {
         playThroughEarpieceAndroid: false,
       });
       
-      const recording = new Audio.Recording();
-      // Use optimized settings for speech: lower sample rate, mono, with metering
-      const options: Audio.RecordingOptions = {
-        isMeteringEnabled: true,
-        android: {
-          extension: ".m4a",
-          outputFormat: AndroidOutputFormat.MPEG_4,
-          audioEncoder: AndroidAudioEncoder.AAC,
-          sampleRate: 16000,  // Lower sample rate for speech
-          numberOfChannels: 1,
-          bitRate: 64000      // Lower bitrate
+      // Use the recommended createAsync pattern with HIGH_QUALITY preset
+      // This handles preparation automatically and is more reliable
+      console.log("[conversation] creating recording with createAsync...");
+      const { recording, status } = await Audio.Recording.createAsync(
+        {
+          isMeteringEnabled: true,
+          android: {
+            extension: ".m4a",
+            outputFormat: AndroidOutputFormat.MPEG_4,
+            audioEncoder: AndroidAudioEncoder.AAC,
+            sampleRate: 44100,
+            numberOfChannels: 1,
+            bitRate: 128000
+          },
+          ios: {
+            extension: ".m4a",
+            audioQuality: IOSAudioQuality.HIGH,
+            sampleRate: 44100,
+            numberOfChannels: 1,
+            bitRate: 128000,
+            outputFormat: IOSOutputFormat.MPEG4AAC
+          },
+          web: {
+            mimeType: "audio/webm"
+          }
         },
-        ios: {
-          extension: ".m4a",
-          audioQuality: IOSAudioQuality.MEDIUM,
-          sampleRate: 16000,
-          numberOfChannels: 1,
-          bitRate: 64000,
-          outputFormat: IOSOutputFormat.MPEG4AAC
+        (recordingStatus) => {
+          // Optional: handle recording status updates
         },
-        web: {
-          mimeType: "audio/webm"
-        }
-      };
+        100 // Update interval in ms
+      );
       
-      console.log("[conversation] preparing recording...");
-      await recording.prepareToRecordAsync(options);
-      console.log("[conversation] starting recording...");
-      await recording.startAsync();
+      console.log("[conversation] recording created, status:", status.isRecording ? "recording" : "not recording");
+      
+      if (!status.isRecording) {
+        console.warn("[conversation] recording created but not started");
+        // Try to start it manually
+        await recording.startAsync();
+      }
       
       recordingRef.current = recording;
       setRecording(true);
@@ -146,6 +167,7 @@ export default function ConversationScreen() {
       return recording;
     } catch (err: any) {
       console.warn("[conversation] startRecording failed:", err?.message || err);
+      console.warn("[conversation] full error:", JSON.stringify(err, null, 2));
       // Clean up any partial state
       recordingRef.current = null;
       setRecording(false);
@@ -157,24 +179,67 @@ export default function ConversationScreen() {
 
   const stopRecording = async () => {
     const recording = recordingRef.current;
-    if (!recording) return null;
-    try {
-      await recording.stopAndUnloadAsync();
-    } catch (err) {
-      console.warn("Error stopping recording:", err);
+    if (!recording) {
+      console.log("[conversation] stopRecording: no recording to stop");
+      return null;
     }
-    const uri = recording.getURI();
+    
+    console.log("[conversation] stopping recording...");
+    let uri: string | null = null;
+    
+    try {
+      // Get URI before stopping (some versions need this)
+      uri = recording.getURI();
+      
+      // Check status before stopping
+      const status = await recording.getStatusAsync();
+      console.log("[conversation] recording status before stop:", status.isRecording ? "recording" : "stopped");
+      
+      if (status.isRecording) {
+        await recording.stopAndUnloadAsync();
+        console.log("[conversation] recording stopped and unloaded");
+      }
+    } catch (err: any) {
+      console.warn("[conversation] error stopping recording:", err?.message || err);
+      // Try to get URI even if stop failed
+      try {
+        uri = recording.getURI();
+      } catch {}
+    }
+    
     recordingRef.current = null;
     setRecording(false);
-    if (!uri) return null;
-    const base64 = await FileSystem.readAsStringAsync(uri, {
-      encoding: "base64"
-    });
-    // Clean up the file
+    
+    // Reset audio mode back to playback
     try {
-      await FileSystem.deleteAsync(uri, { idempotent: true });
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+      });
     } catch {}
-    return base64;
+    
+    if (!uri) {
+      console.log("[conversation] no recording URI available");
+      return null;
+    }
+    
+    console.log("[conversation] reading recording from:", uri);
+    try {
+      const base64 = await FileSystem.readAsStringAsync(uri, {
+        encoding: "base64"
+      });
+      console.log("[conversation] recording read, size:", base64.length);
+      
+      // Clean up the file
+      try {
+        await FileSystem.deleteAsync(uri, { idempotent: true });
+      } catch {}
+      
+      return base64;
+    } catch (err: any) {
+      console.warn("[conversation] error reading recording:", err?.message || err);
+      return null;
+    }
   };
 
   const saveBase64Audio = async (base64: string, mime: string) => {
