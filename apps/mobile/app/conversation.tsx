@@ -180,10 +180,10 @@ export default function ConversationScreen() {
     clearStreamingText();
   };
 
-  const handleSendChunk = async (base64: string) => {
+  const handleSendChunk = async (base64: string, heardVoice: boolean) => {
     try {
       const minLen = 200; // avoid sending empty/too-short payloads
-      if (!base64 || base64.length < minLen) {
+      if (!heardVoice || !base64 || base64.length < minLen) {
         Alert.alert("Conversation failed", "No audio detected. Please try again.");
         return;
       }
@@ -237,14 +237,14 @@ export default function ConversationScreen() {
         if (!hasMeter && duration > MIN_TURN_MS + SILENCE_MS) {
           const base64 = await stopRecording();
           if (base64) {
-            await handleSendChunk(base64);
+            await handleSendChunk(base64, true);
           }
           return;
         }
         if (heardVoice && sinceVoice > SILENCE_MS && duration > MIN_TURN_MS) {
           const base64 = await stopRecording();
           if (base64) {
-            await handleSendChunk(base64);
+            await handleSendChunk(base64, heardVoice);
           }
           return;
         }
@@ -254,8 +254,8 @@ export default function ConversationScreen() {
         await sleep(POLL_INTERVAL_MS);
       }
       const base64 = await stopRecording().catch(() => null);
-      if (base64) {
-        await handleSendChunk(base64);
+      if (base64 && heardVoice) {
+        await handleSendChunk(base64, heardVoice);
       }
     } catch (err) {
       console.warn("Listen loop failed", err);

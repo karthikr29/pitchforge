@@ -145,7 +145,7 @@ async function deepgramTranscribeRealtime(base64, mime = "audio/m4a") {
     encoding: mime.includes("aac") || mime.includes("m4a") ? "aac" : "linear16",
     sample_rate: "44100",
     channels: "1",
-    endpointing: "0" // rely on client-end CloseStream
+    endpointing: "300" // small endpointing to reduce partials
   });
   const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
   return new Promise((resolve, reject) => {
@@ -238,9 +238,10 @@ async function streamLLM(messages, onText) {
   }
 }
 
-async function deepgramSynthesizeTts(text) {
+async function deepgramSynthesizeTts(text, voiceOverride) {
   if (!deepgramApiKey) throw new Error("DEEPGRAM_API_KEY not set");
-  const res = await fetch(`https://api.deepgram.com/v1/speak?model=${encodeURIComponent(deepgramTtsVoice)}`, {
+  const voice = voiceOverride || deepgramTtsVoice;
+  const res = await fetch(`https://api.deepgram.com/v1/speak?model=${encodeURIComponent(voice)}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -337,6 +338,10 @@ wss.on("connection", (ws) => {
         return;
       }
       if (msg.type === "start") {
+        if (personaId) {
+          log("start ignored (already set)");
+          return;
+        }
         personaId = msg.personaId;
         conversationId = msg.conversationId || crypto.randomUUID();
         companyId = msg.companyId;
@@ -392,7 +397,7 @@ wss.on("connection", (ws) => {
           transcript.push({ role: "ai", text: clarify, at: new Date().toISOString() });
           ws.send(JSON.stringify({ type: "text", role: "ai", text: clarify }));
           try {
-            const tts = await deepgramSynthesizeTts(clarify);
+            const tts = await deepgramSynthesizeTts(clarify, persona?.voice);
             ws.send(JSON.stringify({ type: "tts", ...tts }));
           } catch (err) {
             log("tts clarify failed", { error: err?.message || err });
@@ -401,13 +406,30 @@ wss.on("connection", (ws) => {
           sendStatus(ws, "speaking");
           return;
         }
+        const words = userText.split(/\s+/).filter(Boolean);
+        if (words.length < 2 || userText.length < 6) {
+          const clarify = "I didn't catch that—could you repeat?";
+          log("transcript too-short", { text: userText.slice(0, 120) });
+          transcript.push({ role: "ai", text: clarify, at: new Date().toISOString() });
+          ws.send(JSON.stringify({ type: "text", role: "ai", text: clarify }));
+          try {
+            const tts = await deepgramSynthesizeTts(clarify, persona?.voice);
+            ws.send(JSON.stringify({ type: "tts", ...tts }));
+          } catch (err) {
+            log("tts clarify failed", { error: err?.message || err });
+            sendError(ws, err?.message ?? String(err));
+          }
+          sendStatus(ws, "speaking");
+          return;
+        }
+
         if (isNonEnglish(userText)) {
           const warn = "Please keep it in English so I can help.";
           log("transcript non-english", { text: userText.slice(0, 120) });
           transcript.push({ role: "ai", text: warn, at: new Date().toISOString() });
           ws.send(JSON.stringify({ type: "text", role: "ai", text: warn }));
           try {
-            const tts = await deepgramSynthesizeTts(warn);
+            const tts = await deepgramSynthesizeTts(warn, persona?.voice);
             ws.send(JSON.stringify({ type: "tts", ...tts }));
           } catch (err) {
             log("tts non-english failed", { error: err?.message || err });
@@ -422,7 +444,7 @@ wss.on("connection", (ws) => {
           transcript.push({ role: "ai", text: redirect, at: new Date().toISOString() });
           ws.send(JSON.stringify({ type: "text", role: "ai", text: redirect }));
           try {
-            const tts = await deepgramSynthesizeTts(redirect);
+            const tts = await deepgramSynthesizeTts(redirect, persona?.voice);
             ws.send(JSON.stringify({ type: "tts", ...tts }));
           } catch (err) {
             log("tts banned redirect failed", { error: err?.message || err });
@@ -437,7 +459,7 @@ wss.on("connection", (ws) => {
           transcript.push({ role: "ai", text: dup, at: new Date().toISOString() });
           ws.send(JSON.stringify({ type: "text", role: "ai", text: dup }));
           try {
-            const tts = await deepgramSynthesizeTts(dup);
+            const tts = await deepgramSynthesizeTts(dup, persona?.voice);
             ws.send(JSON.stringify({ type: "tts", ...tts }));
           } catch (err) {
             log("tts duplicate failed", { error: err?.message || err });
@@ -454,8 +476,7 @@ wss.on("connection", (ws) => {
         const ragContext =
           rag?.map((r) => r.content).join("\n---\n") ?? "No company-specific context.";
 
-        const words = userText.split(/\s+/).filter(Boolean);
-        const isShortGreeting = words.length <= 3 && userText.length <= 20;
+        const isShortGreeting = words.length <= 3 && words.length >= 2 && userText.length <= 20;
         if (isShortGreeting) {
           const shortReply =
             persona?.name && persona?.role
@@ -466,7 +487,7 @@ wss.on("connection", (ws) => {
           transcript.push({ role: "ai", text: shortReply, at: new Date().toISOString() });
           ws.send(JSON.stringify({ type: "text", role: "ai", text: shortReply }));
           try {
-            const tts = await deepgramSynthesizeTts(shortReply);
+            const tts = await deepgramSynthesizeTts(shortReply, persona?.voice);
             ws.send(JSON.stringify({ type: "tts", ...tts }));
           } catch (err) {
             log("tts short greeting failed", { error: err?.message || err });
@@ -512,7 +533,7 @@ wss.on("connection", (ws) => {
           log("llm done", { chars: fullResponse.length });
           transcript.push({ role: "ai", text: fullResponse.trim(), at: new Date().toISOString() });
           try {
-            const tts = await deepgramSynthesizeTts(fullResponse);
+            const tts = await deepgramSynthesizeTts(fullResponse, persona?.voice);
             ws.send(JSON.stringify({ type: "tts", ...tts }));
           } catch (err) {
             log("tts full response failed", { error: err?.message || err });

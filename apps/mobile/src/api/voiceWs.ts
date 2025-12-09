@@ -30,6 +30,9 @@ export class VoiceWsClient {
   }
 
   connect(start: StartPayload) {
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.close(1000, "reconnect");
+    }
     this.socket = new WebSocket(this.url);
     this.socket.onopen = () => {
       this.send({ type: "start", ...start });
