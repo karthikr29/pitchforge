@@ -7,6 +7,10 @@ const port = process.env.PORT || 10000;
 
 const openaiKey = process.env.OPENAI_API_KEY;
 const openrouterKey = process.env.OPENROUTER_API_KEY;
+const openrouterModel = process.env.OPENROUTER_MODEL || "google/gemini-3-pro-preview";
+const deepgramApiKey = process.env.DEEPGRAM_API_KEY;
+const deepgramSttModel = process.env.DEEPGRAM_STT_MODEL || "nova-2-general";
+const deepgramTtsVoice = process.env.DEEPGRAM_TTS_VOICE || "aura-asteria-en";
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -23,6 +27,12 @@ const server = app.listen(port, () => {
 
 // Helpers
 const encoder = new TextEncoder();
+const bannedPhrases = ["thank you so much for watching", "thank you for watching", "thanks for watching"];
+
+function isNonEnglish(text) {
+  // Simple heuristic: detect non-ASCII (e.g., CJK) characters.
+  return /[^\x00-\x7F]/.test(text);
+}
 
 function toBufferFromBase64(input) {
   const cleaned = input.includes(",") ? input.split(",").pop() ?? input : input;
@@ -86,26 +96,28 @@ async function fetchPersona(personaId) {
   return persona;
 }
 
-async function transcribeChunk(base64, mime = "audio/webm") {
-  if (!openaiKey) throw new Error("OPENAI_API_KEY not set");
+async function deepgramTranscribeChunk(base64, mime = "audio/m4a") {
+  if (!deepgramApiKey) throw new Error("DEEPGRAM_API_KEY not set");
   const audioBytes = toBufferFromBase64(base64);
-  const ext =
-    mime.includes("m4a") ? "m4a" : mime.includes("wav") ? "wav" : mime.includes("ogg") ? "ogg" : "webm";
-  const formData = new FormData();
-  formData.append("file", new Blob([audioBytes], { type: mime }), `audio.${ext}`);
-  formData.append("model", "whisper-1");
-  console.log("[ws] transcribe", { mime, bytes: audioBytes.length, ext });
-  const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${openaiKey}` },
-    body: formData
-  });
+  console.log("[ws] transcribe (deepgram)", { mime, bytes: audioBytes.length });
+  const res = await fetch(
+    `https://api.deepgram.com/v1/listen?model=${encodeURIComponent(deepgramSttModel)}&language=en`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": mime || "audio/m4a",
+        Authorization: `Token ${deepgramApiKey}`
+      },
+      body: audioBytes
+    }
+  );
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Whisper failed (${res.status}): ${text}`);
+    throw new Error(`Deepgram STT failed (${res.status}): ${text}`);
   }
   const data = await res.json();
-  return data.text;
+  const transcript = data?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "";
+  return transcript;
 }
 
 async function streamLLM(messages, onText) {
@@ -117,7 +129,7 @@ async function streamLLM(messages, onText) {
       Authorization: `Bearer ${openrouterKey}`
     },
     body: JSON.stringify({
-      model: "google/gemini-3-pro-preview",
+      model: openrouterModel,
       stream: true,
       messages
     })
@@ -148,27 +160,24 @@ async function streamLLM(messages, onText) {
   }
 }
 
-async function synthesizeTts(text) {
-  if (!openaiKey) throw new Error("OPENAI_API_KEY not set");
-  const res = await fetch("https://api.openai.com/v1/audio/speech", {
+async function deepgramSynthesizeTts(text) {
+  if (!deepgramApiKey) throw new Error("DEEPGRAM_API_KEY not set");
+  const res = await fetch(`https://api.deepgram.com/v1/speak?model=${encodeURIComponent(deepgramTtsVoice)}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${openaiKey}`
+      Authorization: `Token ${deepgramApiKey}`
     },
-    body: JSON.stringify({
-      model: "tts-1",
-      voice: "alloy",
-      input: text
-    })
+    body: JSON.stringify({ text })
   });
   if (!res.ok) {
     const message = await res.text();
-    throw new Error(`TTS failed: ${message}`);
+    throw new Error(`Deepgram TTS failed (${res.status}): ${message}`);
   }
   const arrayBuffer = await res.arrayBuffer();
   const base64 = Buffer.from(arrayBuffer).toString("base64");
-  return { base64, mime: "audio/mpeg" };
+  const mime = res.headers.get("content-type") || "audio/mpeg";
+  return { base64, mime };
 }
 
 function sendStatus(ws, value) {
@@ -227,6 +236,7 @@ wss.on("connection", (ws) => {
   let companyId;
   let startedAt = Date.now();
   let transcript = [];
+  let lastUserText = "";
   const log = (event, extra = {}) => {
     const meta = {
       personaId,
@@ -278,14 +288,15 @@ wss.on("connection", (ws) => {
           }
         }
         sendStatus(ws, "listening");
-        const userText = (await transcribeChunk(msg.base64, msg.mime ?? "audio/webm"))?.trim() ?? "";
+        const userText = (await deepgramTranscribeChunk(msg.base64, msg.mime ?? "audio/m4a"))?.trim() ?? "";
         log("transcript", { text: userText?.slice(0, 400) });
+        const normalized = userText.toLowerCase().trim();
         if (!userText) {
           const clarify = "I didn't catch that—could you repeat?";
           transcript.push({ role: "ai", text: clarify, at: new Date().toISOString() });
           ws.send(JSON.stringify({ type: "text", role: "ai", text: clarify }));
           try {
-            const tts = await synthesizeTts(clarify);
+            const tts = await deepgramSynthesizeTts(clarify);
             ws.send(JSON.stringify({ type: "tts", ...tts }));
           } catch (err) {
             log("tts clarify failed", { error: err?.message || err });
@@ -294,6 +305,52 @@ wss.on("connection", (ws) => {
           sendStatus(ws, "speaking");
           return;
         }
+        if (isNonEnglish(userText)) {
+          const warn = "Please keep it in English so I can help.";
+          log("transcript non-english", { text: userText.slice(0, 120) });
+          transcript.push({ role: "ai", text: warn, at: new Date().toISOString() });
+          ws.send(JSON.stringify({ type: "text", role: "ai", text: warn }));
+          try {
+            const tts = await deepgramSynthesizeTts(warn);
+            ws.send(JSON.stringify({ type: "tts", ...tts }));
+          } catch (err) {
+            log("tts non-english failed", { error: err?.message || err });
+            sendError(ws, err?.message ?? String(err));
+          }
+          sendStatus(ws, "speaking");
+          return;
+        }
+        if (bannedPhrases.some((phrase) => normalized.includes(phrase))) {
+          const redirect = "Let's stay on the pricing and ROI details—what would you like to know?";
+          log("transcript banned phrase", { text: userText.slice(0, 120) });
+          transcript.push({ role: "ai", text: redirect, at: new Date().toISOString() });
+          ws.send(JSON.stringify({ type: "text", role: "ai", text: redirect }));
+          try {
+            const tts = await deepgramSynthesizeTts(redirect);
+            ws.send(JSON.stringify({ type: "tts", ...tts }));
+          } catch (err) {
+            log("tts banned redirect failed", { error: err?.message || err });
+            sendError(ws, err?.message ?? String(err));
+          }
+          sendStatus(ws, "speaking");
+          return;
+        }
+        if (normalized && normalized === lastUserText) {
+          const dup = "I already heard that. Anything else on pricing or ROI?";
+          log("transcript duplicate", { text: userText.slice(0, 120) });
+          transcript.push({ role: "ai", text: dup, at: new Date().toISOString() });
+          ws.send(JSON.stringify({ type: "text", role: "ai", text: dup }));
+          try {
+            const tts = await deepgramSynthesizeTts(dup);
+            ws.send(JSON.stringify({ type: "tts", ...tts }));
+          } catch (err) {
+            log("tts duplicate failed", { error: err?.message || err });
+            sendError(ws, err?.message ?? String(err));
+          }
+          sendStatus(ws, "speaking");
+          return;
+        }
+        lastUserText = normalized;
         transcript.push({ role: "user", text: userText, at: new Date().toISOString() });
 
         // Build context and get model reply
@@ -313,7 +370,7 @@ wss.on("connection", (ws) => {
           transcript.push({ role: "ai", text: shortReply, at: new Date().toISOString() });
           ws.send(JSON.stringify({ type: "text", role: "ai", text: shortReply }));
           try {
-            const tts = await synthesizeTts(shortReply);
+            const tts = await deepgramSynthesizeTts(shortReply);
             ws.send(JSON.stringify({ type: "tts", ...tts }));
           } catch (err) {
             log("tts short greeting failed", { error: err?.message || err });
@@ -331,6 +388,7 @@ wss.on("connection", (ws) => {
           "- Respond only in English, even if the user speaks another language.",
           "- Keep replies concise (1-3 sentences), conversational, and realistic.",
           "- Avoid sign-offs like “Thanks for watching” or social media requests.",
+          "- Never say 'thank you for watching'; stay in-call and focus on pricing/ROI.",
           "- If the user goes off-topic or asks for unrelated actions, steer back to the sales conversation.",
           "- If audio is unclear, briefly ask for clarification instead of inventing content."
         ].join("\n");
@@ -358,7 +416,7 @@ wss.on("connection", (ws) => {
           log("llm done", { chars: fullResponse.length });
           transcript.push({ role: "ai", text: fullResponse.trim(), at: new Date().toISOString() });
           try {
-            const tts = await synthesizeTts(fullResponse);
+            const tts = await deepgramSynthesizeTts(fullResponse);
             ws.send(JSON.stringify({ type: "tts", ...tts }));
           } catch (err) {
             log("tts full response failed", { error: err?.message || err });
