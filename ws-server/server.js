@@ -1,6 +1,7 @@
 const express = require("express");
 const crypto = require("crypto");
 const { WebSocketServer } = require("ws");
+const WebSocket = require("ws");
 
 // Render injects PORT; default to 10000 for local dev.
 const port = process.env.PORT || 10000;
@@ -128,6 +129,54 @@ async function deepgramTranscribeChunk(base64, mime = "audio/m4a") {
   const data = await res.json();
   const transcript = data?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "";
   return transcript;
+}
+
+async function deepgramTranscribeRealtime(base64, mime = "audio/m4a") {
+  if (!deepgramApiKey) throw new Error("DEEPGRAM_API_KEY not set");
+  const audioBytes = toBufferFromBase64(base64);
+  const url = `wss://api.deepgram.com/v1/listen?model=${encodeURIComponent(deepgramSttModel)}&language=en`;
+  return new Promise((resolve, reject) => {
+    const dg = new WebSocket(url, {
+      headers: { Authorization: `Token ${deepgramApiKey}` }
+    });
+    let finalText = "";
+    const timeout = setTimeout(() => {
+      dg.close();
+      reject(new Error("Deepgram realtime timeout"));
+    }, 15000);
+
+    dg.on("open", () => {
+      dg.send(audioBytes);
+      // Signal end of stream per Deepgram docs
+      dg.send(JSON.stringify({ type: "CloseStream" }));
+    });
+
+    dg.on("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        const alt = msg.channel?.alternatives?.[0];
+        const text = alt?.transcript ?? "";
+        if (text) finalText = text;
+        if (msg.is_final || msg.speech_final) {
+          clearTimeout(timeout);
+          dg.close();
+          resolve(finalText.trim());
+        }
+      } catch {
+        // ignore malformed
+      }
+    });
+
+    dg.on("error", (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+
+    dg.on("close", () => {
+      clearTimeout(timeout);
+      resolve(finalText.trim());
+    });
+  });
 }
 
 async function streamLLM(messages, onText) {
@@ -298,7 +347,8 @@ wss.on("connection", (ws) => {
           }
         }
         sendStatus(ws, "listening");
-        const userText = (await deepgramTranscribeChunk(msg.base64, msg.mime ?? "audio/m4a"))?.trim() ?? "";
+        const userText =
+          (await deepgramTranscribeRealtime(msg.base64, msg.mime ?? "audio/m4a"))?.trim() ?? "";
         log("transcript", { text: userText?.slice(0, 400) });
         const normalized = userText.toLowerCase().trim();
         if (!userText) {
