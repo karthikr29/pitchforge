@@ -180,10 +180,15 @@ export default function ConversationScreen() {
     clearStreamingText();
   };
 
-  const handleSendChunk = async (base64: string, heardVoice: boolean, info?: { durationMs?: number }) => {
+  const handleSendChunk = async (
+    base64: string,
+    heardVoice: boolean,
+    info?: { durationMs?: number; forceSend?: boolean }
+  ) => {
     try {
       const minLen = 200; // avoid sending empty/too-short payloads
-      if (!heardVoice || !base64 || base64.length < minLen) {
+      const allow = heardVoice || info?.forceSend;
+      if (!allow || !base64 || base64.length < minLen) {
         console.log("[voice] drop send (no audio)", { heardVoice, len: base64?.length, info });
         Alert.alert("Conversation failed", "No audio detected. Please try again.");
         return;
@@ -266,8 +271,9 @@ export default function ConversationScreen() {
         await sleep(POLL_INTERVAL_MS);
       }
       const base64 = await stopRecording().catch(() => null);
-      if (base64 && (heardVoice || lastDuration > MIN_TURN_MS + SILENCE_MS)) {
-        await handleSendChunk(base64, heardVoice || false, { durationMs: lastDuration });
+      const shouldForce = lastDuration > MIN_TURN_MS + SILENCE_MS;
+      if (base64 && (heardVoice || shouldForce)) {
+        await handleSendChunk(base64, heardVoice || false, { durationMs: lastDuration, forceSend: shouldForce });
       } else {
         console.log("[voice] drop post-loop", { heardVoice, durationMs: lastDuration, hasBase64: !!base64 });
       }
