@@ -18,12 +18,13 @@ import { useTheme } from "../src/context/ThemeContext";
 
 const audioQueue = new AudioQueue();
 
-// Streaming configuration - use shorter chunks for faster response
-const CHUNK_INTERVAL_MS = 800;  // Record 800ms chunks
-const SILENCE_MS = 1000;        // End turn after 1s of silence
-const VAD_THRESHOLD_DB = -42;   // Slightly more sensitive threshold
-const MAX_LISTEN_MS = 10000;    // Max 10s per turn
-const MIN_TURN_MS = 400;        // Minimum speech before considering a turn
+// VAD (Voice Activity Detection) configuration
+// These settings control when the app thinks you've finished speaking
+const SILENCE_MS = 2000;        // End turn after 2s of silence (was 1s - too aggressive!)
+const VAD_THRESHOLD_DB = -45;   // Threshold for voice detection (-45dB is reasonable for speech)
+const MAX_LISTEN_MS = 30000;    // Max 30s per turn (allows for longer responses)
+const MIN_TURN_MS = 800;        // Minimum 800ms of speech before considering a turn valid
+const MIN_SPEECH_BEFORE_SILENCE = 1500; // Must have at least 1.5s of speech before silence can end turn
 
 export default function ConversationScreen() {
   const router = useRouter();
@@ -366,7 +367,12 @@ export default function ConversationScreen() {
       let lastVoiceAt = Date.now();
       let lastLevel = -160;
       const startedAt = Date.now();
-      let lastChunkAt = Date.now();
+      let totalSpeechTime = 0;  // Track cumulative speech time
+      let speechStartTime = 0;  // When current speech segment started
+      let isSpeaking = false;   // Is user currently speaking?
+      
+      console.log("[conversation] VAD config: SILENCE_MS=%d, VAD_THRESHOLD_DB=%d, MAX_LISTEN_MS=%d", 
+        SILENCE_MS, VAD_THRESHOLD_DB, MAX_LISTEN_MS);
       
       while (callActiveRef.current && !isPlaying) {
         const status = await recording.getStatusAsync();
@@ -374,25 +380,33 @@ export default function ConversationScreen() {
         const level = hasMeter ? (status.metering as number) : lastLevel;
         lastLevel = level;
         
+        const now = Date.now();
+        
+        // Track speech segments for better turn detection
         if (hasMeter && level > VAD_THRESHOLD_DB) {
+          if (!isSpeaking) {
+            // Speech just started
+            isSpeaking = true;
+            speechStartTime = now;
+          }
           heardVoice = true;
-          lastVoiceAt = Date.now();
+          lastVoiceAt = now;
+        } else if (isSpeaking) {
+          // Speech just ended - add to total
+          totalSpeechTime += (now - speechStartTime);
+          isSpeaking = false;
         }
         
         const duration = status.durationMillis ?? 0;
-        const sinceVoice = Date.now() - lastVoiceAt;
-        const sinceStart = Date.now() - startedAt;
+        const sinceVoice = now - lastVoiceAt;
+        const sinceStart = now - startedAt;
         
-        // Periodically capture and store chunks for streaming feel
-        // (Even though we send at end, this prepares for future true streaming)
-        if (Date.now() - lastChunkAt > CHUNK_INTERVAL_MS && duration > MIN_TURN_MS) {
-          // We don't actually send intermediate chunks here since expo-av
-          // doesn't support reading partial recordings. This is just timing.
-          lastChunkAt = Date.now();
-        }
+        // Calculate current total speech (including ongoing speech)
+        const currentTotalSpeech = totalSpeechTime + (isSpeaking ? (now - speechStartTime) : 0);
         
-        // Simulator fallback: no metering, use duration-based trigger
-        if (!hasMeter && duration > MIN_TURN_MS + SILENCE_MS) {
+        // Simulator fallback: no metering, use duration-based trigger (longer timeout)
+        if (!hasMeter && duration > MIN_TURN_MS + SILENCE_MS + 1000) {
+          console.log("[conversation] ending turn (no metering fallback), duration=%dms", duration);
           const base64 = await stopRecording();
           if (base64) {
             accumulatedChunksRef.current.push(base64);
@@ -406,8 +420,14 @@ export default function ConversationScreen() {
           return;
         }
         
-        // End turn on silence after speech
-        if (heardVoice && sinceVoice > SILENCE_MS && duration > MIN_TURN_MS) {
+        // End turn on silence after sufficient speech
+        // Must have: heard voice, silence > threshold, enough total recording, AND enough actual speech
+        if (heardVoice && 
+            sinceVoice > SILENCE_MS && 
+            duration > MIN_TURN_MS && 
+            currentTotalSpeech > MIN_SPEECH_BEFORE_SILENCE) {
+          console.log("[conversation] ending turn (silence detected), sinceVoice=%dms, totalSpeech=%dms, duration=%dms", 
+            sinceVoice, currentTotalSpeech, duration);
           const base64 = await stopRecording();
           if (base64) {
             accumulatedChunksRef.current.push(base64);
@@ -423,6 +443,8 @@ export default function ConversationScreen() {
         
         // Max duration reached
         if (sinceStart > MAX_LISTEN_MS) {
+          console.log("[conversation] ending turn (max duration), sinceStart=%dms, totalSpeech=%dms", 
+            sinceStart, currentTotalSpeech);
           const base64 = await stopRecording();
           if (base64 && heardVoice) {
             accumulatedChunksRef.current.push(base64);
