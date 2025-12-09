@@ -153,10 +153,11 @@ async function deepgramTranscribeRealtime(base64, mime = "audio/m4a", meta = {})
     console.warn("[ws] deepgram realtime skipped (empty audio)", { mime, base64Len: base64?.length || 0 });
     return "";
   }
+  const isAac = mime.includes("aac") || mime.includes("m4a") || mime.includes("mp4");
   const params = new URLSearchParams({
     model: deepgramSttModel,
     language: "en",
-    encoding: mime.includes("aac") || mime.includes("m4a") ? "aac" : "linear16",
+    encoding: isAac ? "aac" : "linear16",
     sample_rate: "44100",
     channels: "1",
     endpointing: "0" // rely on client-end CloseStream
