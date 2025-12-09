@@ -5,6 +5,7 @@ type Handlers = {
   onTts: (payload: { base64: string; mime: string }) => void;
   onStatus?: (value: string) => void;
   onError?: (message: string) => void;
+  onTranscript?: (text: string) => void;
 };
 
 type StartPayload = {
@@ -13,10 +14,18 @@ type StartPayload = {
   companyId?: string;
 };
 
+// Audio stream configuration for real-time streaming
+export type AudioStreamConfig = {
+  sampleRate: number;  // e.g., 16000
+  channels: number;    // e.g., 1 (mono)
+  encoding: string;    // e.g., 'pcm_16bit'
+};
+
 export class VoiceWsClient {
   private socket: WebSocket | null = null;
   private url: string;
   private handlers: Handlers;
+  private streamConfig: AudioStreamConfig | null = null;
 
   constructor(handlers: Handlers) {
     const extra = (Constants.expoConfig?.extra as any) || {};
@@ -41,6 +50,7 @@ export class VoiceWsClient {
         else if (msg.type === "tts" && msg.base64) this.handlers.onTts({ base64: msg.base64, mime: msg.mime ?? "audio/mpeg" });
         else if (msg.type === "status" && msg.value) this.handlers.onStatus?.(msg.value);
         else if (msg.type === "error" && msg.message) this.handlers.onError?.(msg.message);
+        else if (msg.type === "transcript" && msg.text) this.handlers.onTranscript?.(msg.text);
       } catch {
         // ignore malformed
       }
@@ -50,9 +60,37 @@ export class VoiceWsClient {
     };
     this.socket.onclose = () => {
       this.socket = null;
+      this.streamConfig = null;
     };
   }
 
+  // Start audio streaming mode with given config
+  startAudioStream(config: AudioStreamConfig) {
+    this.streamConfig = config;
+    this.send({
+      type: "audio-stream-start",
+      sampleRate: config.sampleRate,
+      channels: config.channels,
+      encoding: config.encoding
+    });
+  }
+
+  // Send a raw audio chunk (base64 encoded PCM data)
+  sendAudioChunk(base64: string) {
+    if (!this.streamConfig) {
+      console.warn("[VoiceWsClient] Audio stream not started; call startAudioStream first");
+      return;
+    }
+    this.send({ type: "audio-chunk", base64 });
+  }
+
+  // Signal end of audio stream (triggers transcription/response)
+  endAudioStream() {
+    this.send({ type: "audio-stream-end" });
+    this.streamConfig = null;
+  }
+
+  // Legacy: send a full audio file (for backwards compatibility)
   sendAudio(id: string, mime: string, base64: string) {
     this.send({ type: "audio", id, mime, base64 });
   }
@@ -61,6 +99,11 @@ export class VoiceWsClient {
     this.send({ type: "stop" });
     this.socket?.close();
     this.socket = null;
+    this.streamConfig = null;
+  }
+
+  isConnected(): boolean {
+    return this.socket !== null && this.socket.readyState === WebSocket.OPEN;
   }
 
   private send(payload: any) {

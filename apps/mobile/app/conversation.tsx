@@ -1,28 +1,33 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { View, Text, Pressable, StyleSheet, Alert, ScrollView, Animated } from "react-native";
 import { Audio } from "expo-av";
-// Use legacy FS API to avoid deprecated readAsStringAsync warnings.
 import * as FileSystem from "expo-file-system/legacy";
 import * as Haptics from "expo-haptics";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useRouter } from "expo-router";
 import { useFocusEffect } from "@react-navigation/native";
 import { v4 as uuidv4 } from "uuid";
+import { useAudioRecorder } from "@siteed/expo-audio-studio";
 import { personas } from "../src/constants/personas";
-import { synthesizeTts } from "../src/api/client";
 import { VoiceWsClient } from "../src/api/voiceWs";
 import { splitBufferedText } from "../src/utils/sentenceSplitter";
-import { AudioQueue, cacheTtsToFile } from "../src/utils/audioQueue";
+import { AudioQueue } from "../src/utils/audioQueue";
 import { useSessionStore } from "../src/state/useSessionStore";
 import { Message } from "../src/types";
 import { useTheme } from "../src/context/ThemeContext";
 
 const audioQueue = new AudioQueue();
-const MIN_TURN_MS = 600;
-const SILENCE_MS = 900;
-const VAD_THRESHOLD_DB = -45; // meter level; closer to 0 is louder
-const POLL_INTERVAL_MS = 120;
-const MAX_LISTEN_MS = 8000;
+
+// Streaming audio config for Deepgram
+const STREAM_SAMPLE_RATE = 16000;
+const STREAM_CHANNELS = 1;
+const STREAM_ENCODING = "pcm_16bit";
+const STREAM_INTERVAL_MS = 100; // Send chunk every 100ms
+
+// VAD/Silence detection
+const SILENCE_MS = 1200; // End turn after 1.2s of silence
+const MIN_SPEECH_MS = 500; // Minimum speech duration before considering it a valid turn
+const VAD_THRESHOLD = 0.02; // RMS threshold for voice activity
 
 export default function ConversationScreen() {
   const router = useRouter();
@@ -44,18 +49,29 @@ export default function ConversationScreen() {
   } = useSessionStore();
 
   const persona = personas.find((p) => p.id === personaId);
-  const recordingRef = useRef<Audio.Recording | null>(null);
-  const recordingPrepareRef = useRef(false);
-  const abortRef = useRef<AbortController | null>(null);
   const bufferRef = useRef<string>("");
   const callActiveRef = useRef(false);
-  const listeningRef = useRef(false);
   const [callActive, setCallActive] = useState(false);
   const wsRef = useRef<VoiceWsClient | null>(null);
   const { colors } = useTheme();
+  
+  // Voice activity tracking for turn detection
+  const lastVoiceActivityRef = useRef<number>(0);
+  const speechStartedRef = useRef<number>(0);
+  const hasSpeechRef = useRef(false);
+  const silenceCheckIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const streamActiveRef = useRef(false);
+
+  // Use the streaming audio recorder
+  const {
+    startRecording: startStreamRecording,
+    stopRecording: stopStreamRecording,
+    isRecording: isStreamRecording,
+  } = useAudioRecorder();
+
   const styles = useMemo(
-    () => createStyles(colors, isRecording, isPlaying),
-    [colors, isRecording, isPlaying]
+    () => createStyles(colors, isRecording || isStreamRecording, isPlaying),
+    [colors, isRecording, isStreamRecording, isPlaying]
   );
 
   useEffect(() => {
@@ -64,70 +80,10 @@ export default function ConversationScreen() {
     }
   }, [personaId, router]);
 
-  const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
-
   const ensureConversation = () => {
     if (!conversationId) {
       startConversation(uuidv4());
     }
-  };
-
-  const startRecording = async () => {
-    if (recordingPrepareRef.current || recordingRef.current || isRecording) return null;
-    recordingPrepareRef.current = true;
-    try {
-      await Audio.requestPermissionsAsync();
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true
-      });
-      const recording = new Audio.Recording();
-      // Enable metering to allow simple VAD.
-      const options: Audio.RecordingOptions = {
-        android: {
-          extension: ".m4a",
-          outputFormat: Audio.RECORDING_OPTION_ANDROID_OUTPUT_FORMAT_MPEG_4,
-          audioEncoder: Audio.RECORDING_OPTION_ANDROID_AUDIO_ENCODER_AAC,
-          sampleRate: 44100,
-          numberOfChannels: 1,
-          bitRate: 128000
-        },
-        ios: {
-          extension: ".m4a",
-          audioQuality: Audio.RECORDING_OPTION_IOS_AUDIO_QUALITY_HIGH,
-          sampleRate: 44100,
-          numberOfChannels: 1,
-          bitRate: 128000,
-          outputFormat: Audio.RECORDING_OPTION_IOS_OUTPUT_FORMAT_MPEG4AAC,
-          meteringEnabled: true
-        },
-        web: {
-          mimeType: "audio/webm"
-        }
-      };
-      await recording.prepareToRecordAsync(options);
-      await recording.startAsync();
-      recordingRef.current = recording;
-      setRecording(true);
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      return recording;
-    } finally {
-      recordingPrepareRef.current = false;
-    }
-  };
-
-  const stopRecording = async () => {
-    const recording = recordingRef.current;
-    if (!recording) return null;
-    await recording.stopAndUnloadAsync();
-    const uri = recording.getURI();
-    recordingRef.current = null;
-    setRecording(false);
-    if (!uri) return null;
-    const base64 = await FileSystem.readAsStringAsync(uri, {
-      encoding: "base64"
-    });
-    return base64;
   };
 
   const saveBase64Audio = async (base64: string, mime: string) => {
@@ -137,56 +93,156 @@ export default function ConversationScreen() {
     return path;
   };
 
-  const enqueueSentences = async (sentences: string[]) => {
-    for (const sentence of sentences) {
-      try {
-        const audioBuf = await synthesizeTts(sentence, persona?.voice);
-        const path = await cacheTtsToFile(uuidv4(), audioBuf);
-        audioQueue.enqueue({ id: uuidv4(), uri: path, text: sentence });
-        setQueue(audioQueue.items());
-        if (!audioQueue.isEmpty()) {
-          setPlaying(true);
-          await audioQueue.playNext(() => {
-            setQueue(audioQueue.items());
-            setPlaying(!audioQueue.isEmpty());
-          });
-        }
-      } catch (err) {
-        console.warn("TTS failed", err);
+  // Handle incoming audio stream data from the recorder
+  const handleAudioStream = useCallback(async (event: { data: string | Float32Array; position?: number; eventDataSize?: number }) => {
+    const ws = wsRef.current;
+    if (!ws || !callActiveRef.current || !streamActiveRef.current) return;
+
+    // Get the base64 encoded audio data
+    // The data can be either base64 string or Float32Array depending on platform/config
+    let base64Data: string;
+    if (typeof event.data === "string") {
+      base64Data = event.data;
+    } else {
+      // Convert Float32Array to base64 (PCM 16-bit)
+      const pcm16 = new Int16Array(event.data.length);
+      for (let i = 0; i < event.data.length; i++) {
+        const s = Math.max(-1, Math.min(1, event.data[i]));
+        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      const uint8 = new Uint8Array(pcm16.buffer);
+      // Use btoa for base64 encoding
+      let binary = "";
+      for (let i = 0; i < uint8.length; i++) {
+        binary += String.fromCharCode(uint8[i]);
+      }
+      base64Data = btoa(binary);
+    }
+
+    if (!base64Data || base64Data.length < 10) return;
+
+    // Send chunk to server
+    ws.sendAudioChunk(base64Data);
+
+    // Update voice activity tracking
+    const now = Date.now();
+    if (event.eventDataSize && event.eventDataSize > 0) {
+      // If we're getting data, assume activity
+      lastVoiceActivityRef.current = now;
+      if (!hasSpeechRef.current) {
+        hasSpeechRef.current = true;
+        speechStartedRef.current = now;
       }
     }
-  };
+  }, []);
 
-  const stopAllAudio = async () => {
-    callActiveRef.current = false;
-    setCallActive(false);
-    listeningRef.current = false;
-    abortRef.current?.abort();
-    wsRef.current?.stop();
-    wsRef.current = null;
-    if (recordingRef.current) {
-      try {
-        await recordingRef.current.stopAndUnloadAsync();
-      } catch {
-        // ignore
-      }
-      recordingRef.current = null;
-    }
-    setRecording(false);
-    await audioQueue.stop();
-    audioQueue.clear();
-    setQueue([]);
-    setPlaying(false);
-    clearStreamingText();
-  };
+  // Start streaming audio to the server
+  const startAudioStream = useCallback(async () => {
+    if (streamActiveRef.current || isPlaying) return;
 
-  const handleSendChunk = async (base64: string) => {
     try {
-      const minLen = 200; // avoid sending empty/too-short payloads
-      if (!base64 || base64.length < minLen) {
-        Alert.alert("Conversation failed", "No audio detected. Please try again.");
+      // Request permissions
+      const { granted } = await Audio.requestPermissionsAsync();
+      if (!granted) {
+        Alert.alert("Permission required", "Microphone access is needed for voice calls");
         return;
       }
+
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true
+      });
+
+      // Tell server we're starting an audio stream
+      const ws = wsRef.current;
+      if (ws) {
+        ws.startAudioStream({
+          sampleRate: STREAM_SAMPLE_RATE,
+          channels: STREAM_CHANNELS,
+          encoding: STREAM_ENCODING
+        });
+      }
+
+      // Reset VAD state
+      hasSpeechRef.current = false;
+      speechStartedRef.current = 0;
+      lastVoiceActivityRef.current = Date.now();
+      streamActiveRef.current = true;
+
+      // Start the audio recorder with streaming config
+      await startStreamRecording({
+        sampleRate: STREAM_SAMPLE_RATE,
+        channels: STREAM_CHANNELS,
+        encoding: STREAM_ENCODING as "pcm_16bit",
+        interval: STREAM_INTERVAL_MS,
+        enableProcessing: true,
+        keepAwake: true,
+        onAudioStream: handleAudioStream,
+        onAudioAnalysis: async (data) => {
+          // Use amplitude/energy data for VAD if available
+          // The AudioAnalysisEvent may have different properties depending on version
+          const analysisData = data as { amplitude?: number; energy?: number };
+          const level = analysisData.amplitude ?? analysisData.energy ?? 0;
+          if (level > VAD_THRESHOLD) {
+            lastVoiceActivityRef.current = Date.now();
+            if (!hasSpeechRef.current) {
+              hasSpeechRef.current = true;
+              speechStartedRef.current = Date.now();
+            }
+          }
+        }
+      });
+
+      setRecording(true);
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+
+      // Start silence detection interval
+      silenceCheckIntervalRef.current = setInterval(() => {
+        if (!streamActiveRef.current || isPlaying) return;
+
+        const now = Date.now();
+        const silenceDuration = now - lastVoiceActivityRef.current;
+        const speechDuration = hasSpeechRef.current ? now - speechStartedRef.current : 0;
+
+        // If we've had speech and silence exceeds threshold, end the turn
+        if (hasSpeechRef.current && silenceDuration > SILENCE_MS && speechDuration > MIN_SPEECH_MS) {
+          endAudioStreamAndProcess();
+        }
+      }, 100);
+
+    } catch (err) {
+      console.warn("Failed to start audio stream", err);
+      streamActiveRef.current = false;
+      setRecording(false);
+    }
+  }, [isPlaying, startStreamRecording, handleAudioStream]);
+
+  // End audio stream and trigger processing
+  const endAudioStreamAndProcess = useCallback(async () => {
+    if (!streamActiveRef.current) return;
+
+    streamActiveRef.current = false;
+
+    // Clear silence check interval
+    if (silenceCheckIntervalRef.current) {
+      clearInterval(silenceCheckIntervalRef.current);
+      silenceCheckIntervalRef.current = null;
+    }
+
+    try {
+      await stopStreamRecording();
+    } catch (err) {
+      console.warn("Error stopping recording", err);
+    }
+
+    setRecording(false);
+
+    // Tell server audio stream ended (triggers transcription)
+    const ws = wsRef.current;
+    if (ws && hasSpeechRef.current) {
+      ws.endAudioStream();
+      
+      // Add placeholder message
       ensureConversation();
       const userMessage: Message = {
         id: uuidv4(),
@@ -195,75 +251,40 @@ export default function ConversationScreen() {
         createdAt: new Date().toISOString()
       };
       addMessage(userMessage);
-
-      const ws = wsRef.current;
-      if (ws) {
-        // Expo HIGH_QUALITY records m4a (AAC) on iOS; Deepgram expects audio/mp4.
-        ws.sendAudio(uuidv4(), "audio/mp4", base64);
-      } else {
-        Alert.alert("Conversation failed", "Voice channel not connected");
-      }
-    } catch (err: any) {
-      Alert.alert("Conversation failed", err?.message ?? String(err));
     }
-  };
 
-  const startListeningForTurn = useCallback(async () => {
-    if (listeningRef.current || isPlaying || !callActiveRef.current) return;
-    listeningRef.current = true;
+    // Reset VAD state
+    hasSpeechRef.current = false;
+    speechStartedRef.current = 0;
+  }, [stopStreamRecording, addMessage]);
+
+  const stopAllAudio = useCallback(async () => {
+    callActiveRef.current = false;
+    setCallActive(false);
+    streamActiveRef.current = false;
+
+    // Clear silence check interval
+    if (silenceCheckIntervalRef.current) {
+      clearInterval(silenceCheckIntervalRef.current);
+      silenceCheckIntervalRef.current = null;
+    }
+
+    wsRef.current?.stop();
+    wsRef.current = null;
+
     try {
-      ensureConversation();
-      const recording = await startRecording();
-      if (!recording) {
-        listeningRef.current = false;
-        return;
-      }
-      let heardVoice = false;
-      let lastVoiceAt = Date.now();
-      let lastLevel = -160;
-      const startedAt = Date.now();
-      while (callActiveRef.current && !isPlaying) {
-        const status = await recording.getStatusAsync();
-        const hasMeter = typeof status.metering === "number";
-        const level = hasMeter ? (status.metering as number) : lastLevel;
-        lastLevel = level;
-        if (hasMeter && level > VAD_THRESHOLD_DB) {
-          heardVoice = true;
-          lastVoiceAt = Date.now();
-        }
-        const duration = status.durationMillis ?? 0;
-        const sinceVoice = Date.now() - lastVoiceAt;
-        // Simulator often reports no metering; fall back to a duration-based send to avoid stalling.
-        if (!hasMeter && duration > MIN_TURN_MS + SILENCE_MS) {
-          const base64 = await stopRecording();
-          if (base64) {
-            await handleSendChunk(base64);
-          }
-          return;
-        }
-        if (heardVoice && sinceVoice > SILENCE_MS && duration > MIN_TURN_MS) {
-          const base64 = await stopRecording();
-          if (base64) {
-            await handleSendChunk(base64);
-          }
-          return;
-        }
-        if (!heardVoice && Date.now() - startedAt > MAX_LISTEN_MS) {
-          break;
-        }
-        await sleep(POLL_INTERVAL_MS);
-      }
-      const base64 = await stopRecording().catch(() => null);
-      if (base64) {
-        await handleSendChunk(base64);
-      }
-    } catch (err) {
-      console.warn("Listen loop failed", err);
-      await stopRecording().catch(() => null);
-    } finally {
-      listeningRef.current = false;
+      await stopStreamRecording();
+    } catch {
+      // ignore
     }
-  }, [handleSendChunk, isPlaying, startRecording]);
+
+    setRecording(false);
+    await audioQueue.stop();
+    audioQueue.clear();
+    setQueue([]);
+    setPlaying(false);
+    clearStreamingText();
+  }, [stopStreamRecording, setQueue, setPlaying, setRecording, clearStreamingText]);
 
   const handleTap = async () => {
     if (callActive) {
@@ -274,6 +295,8 @@ export default function ConversationScreen() {
       Alert.alert("Select a persona first");
       return;
     }
+
+    ensureConversation();
 
     const ws = new VoiceWsClient({
       onText: (text) => {
@@ -288,7 +311,6 @@ export default function ConversationScreen() {
             createdAt: new Date().toISOString()
           };
           addMessage(aiMessage);
-          enqueueSentences(sentences);
           clearStreamingText();
         }
       },
@@ -301,7 +323,13 @@ export default function ConversationScreen() {
             setPlaying(true);
             await audioQueue.playNext(() => {
               setQueue(audioQueue.items());
-              setPlaying(!audioQueue.isEmpty());
+              const stillPlaying = !audioQueue.isEmpty();
+              setPlaying(stillPlaying);
+              
+              // Restart listening when done playing
+              if (!stillPlaying && callActiveRef.current) {
+                setTimeout(() => startAudioStream(), 200);
+              }
             });
           }
         } catch (err) {
@@ -309,9 +337,19 @@ export default function ConversationScreen() {
         }
       },
       onStatus: (value) => {
-        // could map to UI status if desired
+        // Handle status updates if needed
+        if (value === "speaking") {
+          // Server is about to send TTS
+        } else if (value === "listening" || value === "ready") {
+          // Server is ready for more input
+        }
       },
-      onError: (message) => Alert.alert("Conversation failed", message)
+      onError: (message) => Alert.alert("Conversation failed", message),
+      onTranscript: (text) => {
+        // Update the user message with actual transcript
+        // This is sent by the server after STT completes
+        console.log("[conversation] transcript received:", text);
+      }
     });
 
     ws.connect({ personaId, conversationId: conversationId ?? undefined });
@@ -319,7 +357,9 @@ export default function ConversationScreen() {
 
     callActiveRef.current = true;
     setCallActive(true);
-    startListeningForTurn();
+
+    // Start streaming audio
+    setTimeout(() => startAudioStream(), 500);
   };
 
   const handleEndConversation = async () => {
@@ -328,11 +368,17 @@ export default function ConversationScreen() {
     resetSession();
   };
 
+  // Restart listening when not playing and call is active
   useEffect(() => {
-    if (callActive && !isPlaying && !listeningRef.current) {
-      startListeningForTurn();
+    if (callActive && !isPlaying && !isStreamRecording && !streamActiveRef.current) {
+      const timer = setTimeout(() => {
+        if (callActiveRef.current && !isPlaying) {
+          startAudioStream();
+        }
+      }, 300);
+      return () => clearTimeout(timer);
     }
-  }, [callActive, isPlaying, startListeningForTurn]);
+  }, [callActive, isPlaying, isStreamRecording, startAudioStream]);
 
   useFocusEffect(
     useCallback(() => {
@@ -340,7 +386,7 @@ export default function ConversationScreen() {
         // Ensure nothing keeps running if the user navigates away.
         stopAllAudio();
       };
-    }, [])
+    }, [stopAllAudio])
   );
 
   const persistTranscript = async () => {
@@ -372,13 +418,13 @@ export default function ConversationScreen() {
         <View style={styles.heroRight}>
           <View style={styles.statusPill}>
             <Text style={styles.statusText}>
-              {isRecording ? "Listening" : isPlaying ? "Speaking" : "Ready"}
+              {isStreamRecording || isRecording ? "Listening" : isPlaying ? "Speaking" : "Ready"}
             </Text>
           </View>
         </View>
       </View>
 
-      <VoiceGlow active={isRecording || isPlaying} color={colors.primary} />
+      <VoiceGlow active={isStreamRecording || isRecording || isPlaying} color={colors.primary} />
 
       <View style={styles.liveBox}>
         <Text style={styles.sectionLabel}>Live transcript</Text>
@@ -422,7 +468,7 @@ export default function ConversationScreen() {
 
       {!callActive && (
         <Pressable
-          style={[styles.mic, isRecording && styles.micActive]}
+          style={[styles.mic, (isRecording || isStreamRecording) && styles.micActive]}
           onPress={handleTap}
         >
           <Text style={styles.micText}>Start call</Text>
@@ -658,4 +704,3 @@ const createStyles = (
       fontWeight: "700"
     }
   });
-

@@ -97,6 +97,7 @@ async function fetchPersona(personaId) {
   return persona;
 }
 
+// Legacy: Transcribe a complete audio file chunk via REST API
 async function deepgramTranscribeChunk(base64, mime = "audio/m4a", meta = {}) {
   if (!deepgramApiKey) throw new Error("DEEPGRAM_API_KEY not set");
   const audioBytes = toBufferFromBase64(base64);
@@ -110,7 +111,7 @@ async function deepgramTranscribeChunk(base64, mime = "audio/m4a", meta = {}) {
       : mime && mime.includes("wav")
       ? "audio/wav"
       : "application/octet-stream";
-  console.log("[ws] transcribe (deepgram)", {
+  console.log("[ws] transcribe (deepgram REST)", {
     mime,
     contentType,
     bytes: audioBytes.length,
@@ -135,7 +136,7 @@ async function deepgramTranscribeChunk(base64, mime = "audio/m4a", meta = {}) {
   const data = await res.json();
   const transcript = data?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "";
   const requestId = res.headers.get("dg-request-id") || res.headers.get("x-request-id");
-  console.log("[ws] transcribe (deepgram) complete", {
+  console.log("[ws] transcribe (deepgram REST) complete", {
     transcriptPreview: transcript.slice(0, 120),
     transcriptLen: transcript.length,
     requestId,
@@ -145,87 +146,45 @@ async function deepgramTranscribeChunk(base64, mime = "audio/m4a", meta = {}) {
   return transcript;
 }
 
-async function deepgramTranscribeRealtime(base64, mime = "audio/m4a", meta = {}) {
+// Create a persistent Deepgram streaming connection for real-time STT
+function createDeepgramStreamConnection(config, meta = {}) {
   if (!deepgramApiKey) throw new Error("DEEPGRAM_API_KEY not set");
-  const audioBytes = toBufferFromBase64(base64);
-  const byteLen = audioBytes.length;
-  if (!byteLen) {
-    console.warn("[ws] deepgram realtime skipped (empty audio)", { mime, base64Len: base64?.length || 0 });
-    return "";
+  
+  const { sampleRate = 16000, channels = 1, encoding = "linear16" } = config;
+  
+  // Map client encoding to Deepgram encoding
+  let dgEncoding = "linear16";
+  if (encoding === "pcm_16bit" || encoding === "linear16") {
+    dgEncoding = "linear16";
+  } else if (encoding === "opus") {
+    dgEncoding = "opus";
   }
-  const isAac = mime.includes("aac") || mime.includes("m4a") || mime.includes("mp4");
+  
   const params = new URLSearchParams({
     model: deepgramSttModel,
     language: "en",
-    encoding: isAac ? "aac" : "linear16",
-    sample_rate: "44100",
-    channels: "1",
-    endpointing: "0" // rely on client-end CloseStream
+    encoding: dgEncoding,
+    sample_rate: String(sampleRate),
+    channels: String(channels),
+    punctuate: "true",
+    interim_results: "true",
+    utterance_end_ms: "1000",
+    vad_events: "true",
+    endpointing: "300"  // 300ms endpointing for turn detection
   });
+  
   const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
-  console.log("[ws] deepgram realtime start", {
-    mime,
-    bytes: byteLen,
-    base64Len: base64?.length || 0,
+  console.log("[ws] deepgram stream connect", {
+    url: url.replace(deepgramApiKey, "***"),
     params: Object.fromEntries(params.entries()),
     ...meta
   });
-  return new Promise((resolve, reject) => {
-    const dg = new WebSocket(url, {
-      headers: { Authorization: `Token ${deepgramApiKey}` }
-    });
-    let finalText = "";
-    let opened = false;
-    const timeout = setTimeout(() => {
-      dg.close();
-      reject(new Error("Deepgram realtime timeout"));
-    }, 15000);
-
-    dg.on("open", () => {
-      opened = true;
-      dg.send(audioBytes);
-      // Signal end of stream per Deepgram docs
-      dg.send(JSON.stringify({ type: "CloseStream" }));
-    });
-
-    dg.on("message", (data) => {
-      try {
-        const msg = JSON.parse(data.toString());
-        const alt = msg.channel?.alternatives?.[0];
-        const text = alt?.transcript ?? "";
-        if (text) finalText = text;
-        if (msg.is_final || msg.speech_final) {
-          clearTimeout(timeout);
-          dg.close();
-          resolve(finalText.trim());
-        }
-      } catch {
-        // ignore malformed
-      }
-    });
-
-    dg.on("error", (err) => {
-      clearTimeout(timeout);
-      console.warn("[ws] deepgram realtime error", { error: err?.message || err, ...meta });
-      reject(err);
-    });
-
-    dg.on("close", () => {
-      clearTimeout(timeout);
-      if (!opened && !finalText) {
-        const err = new Error("Deepgram connection closed before send");
-        console.warn("[ws] deepgram realtime closed before send", { ...meta });
-        reject(err);
-        return;
-      }
-      console.log("[ws] deepgram realtime complete", {
-        transcriptPreview: finalText.slice(0, 120),
-        transcriptLen: finalText.length,
-        ...meta
-      });
-      resolve(finalText.trim());
-    });
+  
+  const dgWs = new WebSocket(url, {
+    headers: { Authorization: `Token ${deepgramApiKey}` }
   });
+  
+  return dgWs;
 }
 
 async function streamLLM(messages, onText) {
@@ -321,6 +280,10 @@ function sendDone(ws) {
   ws.send(JSON.stringify({ type: "done" }));
 }
 
+function sendTranscript(ws, text) {
+  ws.send(JSON.stringify({ type: "transcript", text }));
+}
+
 async function persistTranscript({
   conversationId,
   personaId,
@@ -366,6 +329,13 @@ wss.on("connection", (ws) => {
   let startedAt = Date.now();
   let transcript = [];
   let lastUserText = "";
+  
+  // Streaming audio state
+  let deepgramWs = null;
+  let streamConfig = null;
+  let streamingTranscript = "";
+  let processingResponse = false;
+  
   const log = (event, extra = {}) => {
     const meta = {
       personaId,
@@ -375,24 +345,278 @@ wss.on("connection", (ws) => {
     console.log(`[ws] ${event}`, meta);
   };
 
+  // Process the user's transcribed text and generate AI response
+  async function processUserTurn(userText) {
+    if (processingResponse) {
+      log("skipping duplicate process call");
+      return;
+    }
+    processingResponse = true;
+    
+    try {
+      const normalized = userText.toLowerCase().trim();
+      log("processing turn", { text: userText.slice(0, 200) });
+      
+      // Send transcript to client
+      sendTranscript(ws, userText);
+      
+      if (!userText) {
+        const clarify = "I didn't catch that—could you repeat?";
+        transcript.push({ role: "ai", text: clarify, at: new Date().toISOString() });
+        ws.send(JSON.stringify({ type: "text", role: "ai", text: clarify }));
+        try {
+          const tts = await deepgramSynthesizeTts(clarify, { personaId, conversationId, stage: "clarify-empty" });
+          ws.send(JSON.stringify({ type: "tts", voiceModel: deepgramTtsVoice, ...tts }));
+        } catch (err) {
+          log("tts clarify failed", { error: err?.message || err });
+          sendError(ws, err?.message ?? String(err));
+        }
+        sendStatus(ws, "speaking");
+        return;
+      }
+      
+      if (isNonEnglish(userText)) {
+        const warn = "Please keep it in English so I can help.";
+        log("transcript non-english", { text: userText.slice(0, 120) });
+        transcript.push({ role: "ai", text: warn, at: new Date().toISOString() });
+        ws.send(JSON.stringify({ type: "text", role: "ai", text: warn }));
+        try {
+          const tts = await deepgramSynthesizeTts(warn, { personaId, conversationId, stage: "non-english" });
+          ws.send(JSON.stringify({ type: "tts", voiceModel: deepgramTtsVoice, ...tts }));
+        } catch (err) {
+          log("tts non-english failed", { error: err?.message || err });
+          sendError(ws, err?.message ?? String(err));
+        }
+        sendStatus(ws, "speaking");
+        return;
+      }
+      
+      if (bannedPhrases.some((phrase) => normalized.includes(phrase))) {
+        const redirect = "Let's stay on the pricing and ROI details—what would you like to know?";
+        log("transcript banned phrase", { text: userText.slice(0, 120) });
+        transcript.push({ role: "ai", text: redirect, at: new Date().toISOString() });
+        ws.send(JSON.stringify({ type: "text", role: "ai", text: redirect }));
+        try {
+          const tts = await deepgramSynthesizeTts(redirect, { personaId, conversationId, stage: "banned-redirect" });
+          ws.send(JSON.stringify({ type: "tts", voiceModel: deepgramTtsVoice, ...tts }));
+        } catch (err) {
+          log("tts banned redirect failed", { error: err?.message || err });
+          sendError(ws, err?.message ?? String(err));
+        }
+        sendStatus(ws, "speaking");
+        return;
+      }
+      
+      if (normalized && normalized === lastUserText) {
+        const dup = "I already heard that. Anything else on pricing or ROI?";
+        log("transcript duplicate", { text: userText.slice(0, 120) });
+        transcript.push({ role: "ai", text: dup, at: new Date().toISOString() });
+        ws.send(JSON.stringify({ type: "text", role: "ai", text: dup }));
+        try {
+          const tts = await deepgramSynthesizeTts(dup, { personaId, conversationId, stage: "duplicate" });
+          ws.send(JSON.stringify({ type: "tts", voiceModel: deepgramTtsVoice, ...tts }));
+        } catch (err) {
+          log("tts duplicate failed", { error: err?.message || err });
+          sendError(ws, err?.message ?? String(err));
+        }
+        sendStatus(ws, "speaking");
+        return;
+      }
+      
+      lastUserText = normalized;
+      transcript.push({ role: "user", text: userText, at: new Date().toISOString() });
+
+      // Build context and get model reply
+      const rag = await vectorLookup(companyId, userText);
+      const ragContext = rag?.map((r) => r.content).join("\n---\n") ?? "No company-specific context.";
+
+      const words = userText.split(/\s+/).filter(Boolean);
+      const isShortGreeting = words.length <= 3 && userText.length <= 20;
+      
+      if (isShortGreeting) {
+        const shortReply =
+          persona?.name && persona?.role
+            ? `Hi, this is ${persona.name}. What would you like to cover today?`
+            : "Hi there. What would you like to discuss?";
+        sendStatus(ws, "thinking");
+        log("reply short greeting", { shortReply });
+        transcript.push({ role: "ai", text: shortReply, at: new Date().toISOString() });
+        ws.send(JSON.stringify({ type: "text", role: "ai", text: shortReply }));
+        try {
+          const tts = await deepgramSynthesizeTts(shortReply, { personaId, conversationId, stage: "short-greeting" });
+          ws.send(JSON.stringify({ type: "tts", voiceModel: deepgramTtsVoice, ...tts }));
+        } catch (err) {
+          log("tts short greeting failed", { error: err?.message || err });
+          sendError(ws, err?.message ?? String(err));
+        }
+        sendStatus(ws, "speaking");
+        return;
+      }
+
+      const systemPrompt = [
+        "You are role-playing a sales prospect for training. Stay strictly in character.",
+        `Persona Card: ${persona?.name || "Unknown"} (${persona?.role || "Prospect"})`,
+        `Persona Backstory: ${persona?.prompt || "A typical sales prospect."}`,
+        "Rules:",
+        "- Respond only in English, even if the user speaks another language.",
+        "- Keep replies concise (1-3 sentences), conversational, and realistic.",
+        "- Avoid sign-offs like 'Thanks for watching' or social media requests.",
+        "- Never say 'thank you for watching'; stay in-call and focus on pricing/ROI.",
+        "- If the user goes off-topic or asks for unrelated actions, steer back to the sales conversation.",
+        "- If audio is unclear, briefly ask for clarification instead of inventing content."
+      ].join("\n");
+
+      const messages = [
+        { role: "system", content: `${systemPrompt}\n\nContext (may be empty):\n${ragContext}` },
+        { role: "user", content: userText }
+      ];
+
+      sendStatus(ws, "thinking");
+      log("llm start", { words: words.length });
+
+      let fullResponse = "";
+      try {
+        await streamLLM(messages, (chunk) => {
+          fullResponse += chunk;
+          ws.send(JSON.stringify({ type: "text", role: "ai", text: chunk }));
+        });
+      } catch (err) {
+        log("llm error", { error: err?.message || err });
+        sendError(ws, err?.message ?? String(err));
+      }
+
+      if (fullResponse.trim()) {
+        log("llm done", { chars: fullResponse.length });
+        transcript.push({ role: "ai", text: fullResponse.trim(), at: new Date().toISOString() });
+        try {
+          const tts = await deepgramSynthesizeTts(fullResponse, { personaId, conversationId, stage: "llm-full-response" });
+          ws.send(JSON.stringify({ type: "tts", voiceModel: deepgramTtsVoice, ...tts }));
+        } catch (err) {
+          log("tts full response failed", { error: err?.message || err });
+          sendError(ws, err?.message ?? String(err));
+        }
+      } else {
+        log("llm empty response");
+      }
+
+      sendStatus(ws, "speaking");
+    } finally {
+      processingResponse = false;
+    }
+  }
+
+  // Set up Deepgram streaming handlers
+  function setupDeepgramStream() {
+    if (!deepgramWs) return;
+    
+    deepgramWs.on("open", () => {
+      log("deepgram stream opened");
+      sendStatus(ws, "listening");
+    });
+    
+    deepgramWs.on("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        
+        // Handle transcript messages
+        if (msg.type === "Results") {
+          const alt = msg.channel?.alternatives?.[0];
+          const text = alt?.transcript ?? "";
+          const isFinal = msg.is_final === true;
+          const speechFinal = msg.speech_final === true;
+          
+          if (text) {
+            if (isFinal) {
+              // Accumulate final transcript pieces
+              streamingTranscript += (streamingTranscript ? " " : "") + text;
+              log("deepgram interim final", { text: text.slice(0, 100), accumulated: streamingTranscript.length });
+            }
+            
+            // On speech_final, process the complete utterance
+            if (speechFinal && streamingTranscript.trim()) {
+              log("deepgram speech_final", { transcript: streamingTranscript.slice(0, 200) });
+              const finalText = streamingTranscript.trim();
+              streamingTranscript = "";
+              processUserTurn(finalText);
+            }
+          }
+        }
+        
+        // Handle utterance end (silence detection)
+        if (msg.type === "UtteranceEnd") {
+          log("deepgram utterance_end", { transcript: streamingTranscript.slice(0, 200) });
+          if (streamingTranscript.trim()) {
+            const finalText = streamingTranscript.trim();
+            streamingTranscript = "";
+            processUserTurn(finalText);
+          }
+        }
+        
+        // Handle speech started event
+        if (msg.type === "SpeechStarted") {
+          log("deepgram speech_started");
+        }
+        
+      } catch (err) {
+        log("deepgram message parse error", { error: err?.message || err });
+      }
+    });
+    
+    deepgramWs.on("error", (err) => {
+      log("deepgram stream error", { error: err?.message || err });
+    });
+    
+    deepgramWs.on("close", (code, reason) => {
+      log("deepgram stream closed", { code, reason: reason?.toString() });
+      deepgramWs = null;
+      
+      // Process any remaining transcript
+      if (streamingTranscript.trim()) {
+        const finalText = streamingTranscript.trim();
+        streamingTranscript = "";
+        processUserTurn(finalText);
+      }
+    });
+  }
+
+  // Close Deepgram stream gracefully
+  function closeDeepgramStream() {
+    if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+      try {
+        // Send CloseStream message per Deepgram docs
+        deepgramWs.send(JSON.stringify({ type: "CloseStream" }));
+      } catch (err) {
+        log("deepgram close error", { error: err?.message || err });
+      }
+    }
+    deepgramWs = null;
+    streamConfig = null;
+  }
+
   sendStatus(ws, "ready");
   log("connection opened");
 
   ws.on("message", async (data) => {
     try {
       const raw = data.toString();
-      log("message", { raw: raw.slice(0, 200) });
+      // Don't log full audio chunks (too large)
+      const logRaw = raw.length > 500 ? raw.slice(0, 200) + "...[truncated]" : raw;
+      log("message", { raw: logRaw });
+      
       const msg = JSON.parse(raw);
+      
       if (msg.type === "ping") {
         ws.send(JSON.stringify({ type: "pong" }));
         return;
       }
+      
       if (msg.type === "start") {
         personaId = msg.personaId;
         conversationId = msg.conversationId || crypto.randomUUID();
         companyId = msg.companyId;
         startedAt = Date.now();
         transcript = [];
+        streamingTranscript = "";
         try {
           persona = await fetchPersona(personaId);
           sendStatus(ws, "ready");
@@ -402,6 +626,85 @@ wss.on("connection", (ws) => {
         }
         return;
       }
+      
+      // Handle streaming audio start
+      if (msg.type === "audio-stream-start") {
+        if (!personaId) {
+          sendError(ws, "start not sent");
+          return;
+        }
+        if (!persona) {
+          try {
+            persona = await fetchPersona(personaId);
+          } catch (err) {
+            log("persona reload failed", { error: err?.message || err });
+            sendError(ws, err?.message || "persona load failed");
+            return;
+          }
+        }
+        
+        // Close any existing stream
+        closeDeepgramStream();
+        
+        // Store stream config
+        streamConfig = {
+          sampleRate: msg.sampleRate || 16000,
+          channels: msg.channels || 1,
+          encoding: msg.encoding || "pcm_16bit"
+        };
+        
+        // Create new Deepgram stream
+        streamingTranscript = "";
+        deepgramWs = createDeepgramStreamConnection(streamConfig, { personaId, conversationId });
+        setupDeepgramStream();
+        
+        log("audio stream started", streamConfig);
+        return;
+      }
+      
+      // Handle streaming audio chunk
+      if (msg.type === "audio-chunk") {
+        if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN) {
+          // If no stream is open, silently ignore (might be late chunks after stream ended)
+          log("audio chunk ignored (no stream)", { base64Len: msg.base64?.length || 0 });
+          return;
+        }
+        
+        const audioBytes = toBufferFromBase64(msg.base64 || "");
+        if (audioBytes.length > 0) {
+          deepgramWs.send(audioBytes);
+        }
+        return;
+      }
+      
+      // Handle streaming audio end
+      if (msg.type === "audio-stream-end") {
+        log("audio stream end requested", { hasTranscript: streamingTranscript.length > 0 });
+        
+        if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+          // Send CloseStream to get final results
+          try {
+            deepgramWs.send(JSON.stringify({ type: "CloseStream" }));
+          } catch (err) {
+            log("deepgram close stream error", { error: err?.message || err });
+          }
+        }
+        
+        // Process any accumulated transcript if Deepgram hasn't sent speech_final
+        setTimeout(() => {
+          if (streamingTranscript.trim() && !processingResponse) {
+            const finalText = streamingTranscript.trim();
+            streamingTranscript = "";
+            log("processing remaining transcript on stream end", { text: finalText.slice(0, 200) });
+            processUserTurn(finalText);
+          }
+          closeDeepgramStream();
+        }, 500);
+        
+        return;
+      }
+      
+      // Legacy: Handle complete audio file (for backwards compatibility)
       if (msg.type === "audio") {
         if (!personaId) {
           sendError(ws, "start not sent");
@@ -419,7 +722,8 @@ wss.on("connection", (ws) => {
         const base64Len = msg.base64?.length || 0;
         const mime = msg.mime ?? "audio/m4a";
         const bytesLen = toBufferFromBase64(msg.base64 || "").length;
-        log("audio received", { mime, base64Len, bytesLen });
+        log("audio received (legacy)", { mime, base64Len, bytesLen });
+        
         if (!bytesLen) {
           const clarify = "I didn't catch that—could you repeat?";
           transcript.push({ role: "ai", text: clarify, at: new Date().toISOString() });
@@ -434,152 +738,17 @@ wss.on("connection", (ws) => {
           sendStatus(ws, "speaking");
           return;
         }
+        
         sendStatus(ws, "listening");
         
-        // Use REST API instead of Realtime for full file chunks to avoid 400 errors with large payloads
+        // Use REST API for file-based audio
         const userText = (await deepgramTranscribeChunk(msg.base64, mime, { personaId, conversationId }))?.trim() ?? "";
-        
-        log("transcript", { text: userText?.slice(0, 400) });
-        const normalized = userText.toLowerCase().trim();
-        if (!userText) {
-          const clarify = "I didn't catch that—could you repeat?";
-          transcript.push({ role: "ai", text: clarify, at: new Date().toISOString() });
-          ws.send(JSON.stringify({ type: "text", role: "ai", text: clarify }));
-          try {
-            const tts = await deepgramSynthesizeTts(clarify, { personaId, conversationId, stage: "clarify-empty" });
-            ws.send(JSON.stringify({ type: "tts", voiceModel: deepgramTtsVoice, ...tts }));
-          } catch (err) {
-            log("tts clarify failed", { error: err?.message || err });
-            sendError(ws, err?.message ?? String(err));
-          }
-          sendStatus(ws, "speaking");
-          return;
-        }
-        if (isNonEnglish(userText)) {
-          const warn = "Please keep it in English so I can help.";
-          log("transcript non-english", { text: userText.slice(0, 120) });
-          transcript.push({ role: "ai", text: warn, at: new Date().toISOString() });
-          ws.send(JSON.stringify({ type: "text", role: "ai", text: warn }));
-          try {
-            const tts = await deepgramSynthesizeTts(warn, { personaId, conversationId, stage: "non-english" });
-            ws.send(JSON.stringify({ type: "tts", voiceModel: deepgramTtsVoice, ...tts }));
-          } catch (err) {
-            log("tts non-english failed", { error: err?.message || err });
-            sendError(ws, err?.message ?? String(err));
-          }
-          sendStatus(ws, "speaking");
-          return;
-        }
-        if (bannedPhrases.some((phrase) => normalized.includes(phrase))) {
-          const redirect = "Let's stay on the pricing and ROI details—what would you like to know?";
-          log("transcript banned phrase", { text: userText.slice(0, 120) });
-          transcript.push({ role: "ai", text: redirect, at: new Date().toISOString() });
-          ws.send(JSON.stringify({ type: "text", role: "ai", text: redirect }));
-          try {
-            const tts = await deepgramSynthesizeTts(redirect, { personaId, conversationId, stage: "banned-redirect" });
-            ws.send(JSON.stringify({ type: "tts", voiceModel: deepgramTtsVoice, ...tts }));
-          } catch (err) {
-            log("tts banned redirect failed", { error: err?.message || err });
-            sendError(ws, err?.message ?? String(err));
-          }
-          sendStatus(ws, "speaking");
-          return;
-        }
-        if (normalized && normalized === lastUserText) {
-          const dup = "I already heard that. Anything else on pricing or ROI?";
-          log("transcript duplicate", { text: userText.slice(0, 120) });
-          transcript.push({ role: "ai", text: dup, at: new Date().toISOString() });
-          ws.send(JSON.stringify({ type: "text", role: "ai", text: dup }));
-          try {
-            const tts = await deepgramSynthesizeTts(dup, { personaId, conversationId, stage: "duplicate" });
-            ws.send(JSON.stringify({ type: "tts", voiceModel: deepgramTtsVoice, ...tts }));
-          } catch (err) {
-            log("tts duplicate failed", { error: err?.message || err });
-            sendError(ws, err?.message ?? String(err));
-          }
-          sendStatus(ws, "speaking");
-          return;
-        }
-        lastUserText = normalized;
-        transcript.push({ role: "user", text: userText, at: new Date().toISOString() });
-
-        // Build context and get model reply
-        const rag = await vectorLookup(companyId, userText);
-        const ragContext =
-          rag?.map((r) => r.content).join("\n---\n") ?? "No company-specific context.";
-
-        const words = userText.split(/\s+/).filter(Boolean);
-        const isShortGreeting = words.length <= 3 && userText.length <= 20;
-        if (isShortGreeting) {
-          const shortReply =
-            persona?.name && persona?.role
-              ? `Hi, this is ${persona.name}. What would you like to cover today?`
-              : "Hi there. What would you like to discuss?";
-          sendStatus(ws, "thinking");
-          log("reply short greeting", { shortReply });
-          transcript.push({ role: "ai", text: shortReply, at: new Date().toISOString() });
-          ws.send(JSON.stringify({ type: "text", role: "ai", text: shortReply }));
-          try {
-            const tts = await deepgramSynthesizeTts(shortReply, { personaId, conversationId, stage: "short-greeting" });
-            ws.send(JSON.stringify({ type: "tts", voiceModel: deepgramTtsVoice, ...tts }));
-          } catch (err) {
-            log("tts short greeting failed", { error: err?.message || err });
-            sendError(ws, err?.message ?? String(err));
-          }
-          sendStatus(ws, "speaking");
-          return;
-        }
-
-        const systemPrompt = [
-          "You are role-playing a sales prospect for training. Stay strictly in character.",
-          `Persona Card: ${persona.name} (${persona.role})`,
-          `Persona Backstory: ${persona.prompt}`,
-          "Rules:",
-          "- Respond only in English, even if the user speaks another language.",
-          "- Keep replies concise (1-3 sentences), conversational, and realistic.",
-          "- Avoid sign-offs like “Thanks for watching” or social media requests.",
-          "- Never say 'thank you for watching'; stay in-call and focus on pricing/ROI.",
-          "- If the user goes off-topic or asks for unrelated actions, steer back to the sales conversation.",
-          "- If audio is unclear, briefly ask for clarification instead of inventing content."
-        ].join("\n");
-
-        const messages = [
-          { role: "system", content: `${systemPrompt}\n\nContext (may be empty):\n${ragContext}` },
-          { role: "user", content: userText }
-        ];
-
-        sendStatus(ws, "thinking");
-        log("llm start", { words: words.length });
-
-        let fullResponse = "";
-        try {
-          await streamLLM(messages, (chunk) => {
-            fullResponse += chunk;
-            ws.send(JSON.stringify({ type: "text", role: "ai", text: chunk }));
-          });
-        } catch (err) {
-          log("llm error", { error: err?.message || err });
-          sendError(ws, err?.message ?? String(err));
-        }
-
-        if (fullResponse.trim()) {
-          log("llm done", { chars: fullResponse.length });
-          transcript.push({ role: "ai", text: fullResponse.trim(), at: new Date().toISOString() });
-          try {
-            const tts = await deepgramSynthesizeTts(fullResponse, { personaId, conversationId, stage: "llm-full-response" });
-            ws.send(JSON.stringify({ type: "tts", voiceModel: deepgramTtsVoice, ...tts }));
-          } catch (err) {
-            log("tts full response failed", { error: err?.message || err });
-            sendError(ws, err?.message ?? String(err));
-          }
-        } else {
-          log("llm empty response");
-        }
-
-        sendStatus(ws, "speaking");
+        await processUserTurn(userText);
         return;
       }
+      
       if (msg.type === "stop") {
+        closeDeepgramStream();
         await persistTranscript({
           conversationId: conversationId || crypto.randomUUID(),
           personaId,
@@ -598,7 +767,7 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
+    closeDeepgramStream();
     log("connection closed");
   });
 });
-
