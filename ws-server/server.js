@@ -146,6 +146,17 @@ async function deepgramTranscribeRealtime(base64, mime = "audio/m4a") {
     }, 15000);
 
     dg.on("open", () => {
+      dg.send(
+        JSON.stringify({
+          type: "configure",
+          encoding: "aac",
+          sample_rate: 44100,
+          channels: 1,
+          model: deepgramSttModel,
+          language: "en",
+          interim_results: false
+        })
+      );
       dg.send(audioBytes);
       // Signal end of stream per Deepgram docs
       dg.send(JSON.stringify({ type: "CloseStream" }));
