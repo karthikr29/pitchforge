@@ -99,13 +99,23 @@ async function fetchPersona(personaId) {
 async function deepgramTranscribeChunk(base64, mime = "audio/m4a") {
   if (!deepgramApiKey) throw new Error("DEEPGRAM_API_KEY not set");
   const audioBytes = toBufferFromBase64(base64);
-  console.log("[ws] transcribe (deepgram)", { mime, bytes: audioBytes.length });
+  const contentType =
+    mime && mime.includes("m4a")
+      ? "audio/mp4"
+      : mime && mime.includes("mp4")
+      ? "audio/mp4"
+      : mime && mime.includes("webm")
+      ? "audio/webm"
+      : mime && mime.includes("wav")
+      ? "audio/wav"
+      : "application/octet-stream";
+  console.log("[ws] transcribe (deepgram)", { mime, contentType, bytes: audioBytes.length });
   const res = await fetch(
     `https://api.deepgram.com/v1/listen?model=${encodeURIComponent(deepgramSttModel)}&language=en`,
     {
       method: "POST",
       headers: {
-        "Content-Type": mime || "audio/m4a",
+        "Content-Type": contentType,
         Authorization: `Token ${deepgramApiKey}`
       },
       body: audioBytes
