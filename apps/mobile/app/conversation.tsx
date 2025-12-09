@@ -52,6 +52,7 @@ export default function ConversationScreen() {
   const listeningRef = useRef(false);
   const streamStartedRef = useRef(false);
   const accumulatedChunksRef = useRef<string[]>([]);
+  const recordingFailureCountRef = useRef(0);
   const [callActive, setCallActive] = useState(false);
   const wsRef = useRef<VoiceWsClient | null>(null);
   const { colors } = useTheme();
@@ -76,14 +77,38 @@ export default function ConversationScreen() {
   };
 
   const startRecording = async () => {
-    if (recordingPrepareRef.current || recordingRef.current || isRecording) return null;
+    if (recordingPrepareRef.current) {
+      console.log("[conversation] recording already preparing, skipping");
+      return null;
+    }
+    if (recordingRef.current) {
+      console.log("[conversation] recording already exists, skipping");
+      return null;
+    }
+    if (isRecording) {
+      console.log("[conversation] already recording, skipping");
+      return null;
+    }
+    
     recordingPrepareRef.current = true;
     try {
-      await Audio.requestPermissionsAsync();
+      // Request permissions
+      const { granted } = await Audio.requestPermissionsAsync();
+      if (!granted) {
+        console.warn("[conversation] microphone permission denied");
+        Alert.alert("Permission Required", "Microphone access is needed for voice calls");
+        return null;
+      }
+      
+      // Set audio mode
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
-        playsInSilentModeIOS: true
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
       });
+      
       const recording = new Audio.Recording();
       // Use optimized settings for speech: lower sample rate, mono, with metering
       const options: Audio.RecordingOptions = {
@@ -108,12 +133,23 @@ export default function ConversationScreen() {
           mimeType: "audio/webm"
         }
       };
+      
+      console.log("[conversation] preparing recording...");
       await recording.prepareToRecordAsync(options);
+      console.log("[conversation] starting recording...");
       await recording.startAsync();
+      
       recordingRef.current = recording;
       setRecording(true);
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      console.log("[conversation] recording started successfully");
       return recording;
+    } catch (err: any) {
+      console.warn("[conversation] startRecording failed:", err?.message || err);
+      // Clean up any partial state
+      recordingRef.current = null;
+      setRecording(false);
+      return null;
     } finally {
       recordingPrepareRef.current = false;
     }
@@ -154,6 +190,7 @@ export default function ConversationScreen() {
     listeningRef.current = false;
     streamStartedRef.current = false;
     accumulatedChunksRef.current = [];
+    recordingFailureCountRef.current = 0;
     
     wsRef.current?.stop();
     wsRef.current = null;
@@ -207,16 +244,45 @@ export default function ConversationScreen() {
   }, [addMessage]);
 
   const startListeningForTurn = useCallback(async () => {
-    if (listeningRef.current || isPlaying || !callActiveRef.current) return;
+    if (listeningRef.current) {
+      console.log("[conversation] already listening, skipping");
+      return;
+    }
+    if (isPlaying) {
+      console.log("[conversation] playing audio, skipping listen");
+      return;
+    }
+    if (!callActiveRef.current) {
+      console.log("[conversation] call not active, skipping listen");
+      return;
+    }
+    
     listeningRef.current = true;
     streamStartedRef.current = false;
     accumulatedChunksRef.current = [];
     
     try {
       ensureConversation();
+      
+      // Reset audio mode before starting to record
+      try {
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: true,
+          playsInSilentModeIOS: true,
+          staysActiveInBackground: false,
+          shouldDuckAndroid: true,
+          playThroughEarpieceAndroid: false,
+        });
+      } catch (err) {
+        console.warn("[conversation] audio mode reset failed:", err);
+      }
+      
+      console.log("[conversation] starting to listen for turn...");
       const recording = await startRecording();
       if (!recording) {
+        console.warn("[conversation] failed to start recording, will retry after delay");
         listeningRef.current = false;
+        // Don't immediately retry - the useEffect will retry with a delay
         return;
       }
       
@@ -409,11 +475,25 @@ export default function ConversationScreen() {
   // Restart listening when not playing and call is active
   useEffect(() => {
     if (callActive && !isPlaying && !listeningRef.current) {
-      const timer = setTimeout(() => {
-        if (callActiveRef.current && !isPlaying) {
-          startListeningForTurn();
+      // Exponential backoff based on failure count (300ms, 600ms, 1200ms, etc., max 5s)
+      const baseDelay = 300;
+      const delay = Math.min(baseDelay * Math.pow(2, recordingFailureCountRef.current), 5000);
+      
+      console.log(`[conversation] scheduling listen retry in ${delay}ms (failures: ${recordingFailureCountRef.current})`);
+      
+      const timer = setTimeout(async () => {
+        if (callActiveRef.current && !isPlaying && !listeningRef.current) {
+          await startListeningForTurn();
+          
+          // If we're still not listening after the call, increment failure count
+          if (!listeningRef.current && callActiveRef.current) {
+            recordingFailureCountRef.current = Math.min(recordingFailureCountRef.current + 1, 5);
+          } else {
+            // Reset failure count on success
+            recordingFailureCountRef.current = 0;
+          }
         }
-      }, 300);
+      }, delay);
       return () => clearTimeout(timer);
     }
   }, [callActive, isPlaying, startListeningForTurn]);
